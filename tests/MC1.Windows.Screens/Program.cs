@@ -427,6 +427,42 @@ if (dm is not null)
     Console.WriteLine($"active={vm.Chats.Active?.Title} msgs={vm.Chats.Active?.Messages.Count}");
 }
 Shot("03-chat-dm");
+// For the README: a lively Public channel (fictional demo people), read, with repeats heard on your own messages.
+if (only is not null && only.Any(o => o.StartsWith("40-readme")))
+{
+    var rid = core.RadioId!;
+    var now = MC1.Core.Models.Time.Now();
+    (string? Who, string Text, int MinAgo, double Snr, int Hops, int Repeats)[] talk =
+    [
+        ("Bob", "Good morning, everyone! The ridge repeater is up and running.", 34, 6.5, 2, 0),
+        ("Alice", "Loud and clear from the valley, 2 hops via Hilltop Repeater 👍", 31, 9.25, 2, 0),
+        (null, "Copy that! Checking in from MeshCore for Windows on my PC.", 29, 0, 0, 3),
+        ("Bob", "Nice, is that the new desktop app?", 27, 6.0, 2, 0),
+        (null, "Yes: chats, the map, trace path and line of sight, all on the big screen.", 25, 0, 0, 2),
+        ("Alice", "Net check-in tonight at 7 pm on #test 📻", 12, 8.75, 1, 0),
+        ("Town Square", "Room server is back online. Welcome everyone!", 4, 4.5, 1, 0),
+    ];
+    foreach (var t in talk)
+    {
+        var at = now - t.MinAgo * 60_000L;
+        core.Db.SaveMessage(new MC1.Core.Models.MessageRecord
+        {
+            RadioId = rid, ChannelIndex = 0, Text = t.Text, Timestamp = at / 1000, SortDate = at, CreatedAt = at,
+            SenderName = t.Who, Direction = t.Who is null ? 1 : 0, Status = t.Who is null ? 2 : 3, IsRead = true,
+            Snr = t.Who is null ? null : t.Snr, PathLength = t.Hops, HeardRepeats = t.Repeats, RouteType = 0,
+        });
+    }
+    Pump(4000); // let the demo's replies arrive first
+    foreach (var c in vm.Chats.Conversations.ToList()) core.Messages.MarkRead(c.Key);
+    vm.Chats.Reload();
+    Pump(300);
+    var pub = vm.Chats.Conversations.FirstOrDefault(c => c.Key == "ch:0") ?? vm.Chats.Conversations.First(c => c.Kind == ChatFilter.Channels);
+    vm.Chats.Selected = pub;
+    vm.Toasts.Clear();
+    Pump(1200);
+    vm.Toasts.Clear();
+    Shot("40-readme-chat");
+}
 if (Environment.GetEnvironmentVariable("MC1_DIVIDER") is not null && vm.Chats.Active is { } act)
 {
     // Window minimised while a reply arrives, then restored: the reply gets a "New Messages" line.

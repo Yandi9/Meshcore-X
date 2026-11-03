@@ -50,7 +50,9 @@
     </Border>
 
     <!-- Page content -->
-    <ContentControl Grid.Row="0" Grid.Column="1" Content="{Binding CurrentPage}" />
+    <ContentControl Grid.Row="0" Grid.Column="1" Content="{Binding PageContent}" />
+    <!-- CoreScope keeps its own area once opened, hidden while other pages show, so its page isn't reloaded -->
+    <ContentControl Grid.Row="0" Grid.Column="1" Content="{Binding CoreScopePage}" IsVisible="{Binding IsCoreScopeShown}" />
 
     <!-- Status bar -->
     <Border Grid.Row="1" Grid.Column="1" Background="{DynamicResource App.Surface}" BorderBrush="{DynamicResource App.Border}"

@@ -65,6 +65,27 @@ public sealed class SimulatedRadio : IMeshTransport
     private string? _defaultScopeName;
     private int _signLength;
 
+    // Firmware 1.18 radio CLI state (CMD 66): WiFi settings apply on reboot; other set keys are remembered.
+    private bool _wifiEnabled, _wifiActive;
+    private string _wifiSsid = "", _wifiPwd = "", _wifiActiveSsid = "";
+    private int _tzOffset;
+    private readonly Dictionary<string, string> _cliVars = new() { ["af"] = "1.0", ["rxdelay"] = "0.0", ["txdelay"] = "0.5", ["direct.txdelay"] = "0.2", ["cad"] = "off" };
+
+    /// <summary>Companion protocol version reported by DEVICE_QUERY (14 = firmware 1.18: radio CLI, power off, remote CLI).</summary>
+    public byte FirmwareCode { get; set; } = 14;
+
+    /// <summary>False simulates a board without a power switch: <c>poweroff</c> gets an immediate CLI reply.</summary>
+    public bool SupportsPowerOff { get; set; } = true;
+
+    /// <summary>Set when a <c>poweroff</c> CLI command switched the simulated board off (tests).</summary>
+    public bool PoweredOff { get; private set; }
+
+    /// <summary>Length of the last CMD_UPDATE_CONTACT frame (tests: 144 since firmware-aligned updates).</summary>
+    public int LastContactUpdateLength { get; private set; }
+
+    /// <summary>Names of contacts that granted this radio remote CLI (they run <see cref="TextType.CliCommand"/> messages).</summary>
+    public HashSet<string> RemoteCliGrantedBy { get; } = ["Alice"];
+
     public SimulatedRadio(int seed = 42, bool chatter = true)
     {
         _rng = new Random(seed);
@@ -150,8 +171,41 @@ public sealed class SimulatedRadio : IMeshTransport
         }
     }
 
+    /// <summary>The radio acknowledges contact updates but keeps the old flags (tests a favourite the radio doesn't confirm).</summary>
+    public bool IgnoreContactFlagChangesForTest { get; set; }
+
+    /// <summary>Changes a contact as another app on the radio would (tests): favourite flag, advert time, path.</summary>
+    public void UpdateContactForTest(string name, bool? favorite = null, uint? lastAdvert = null, byte[]? path = null)
+    {
+        lock (_lock)
+        {
+            var n = _nodes.First(x => x.Name == name);
+            if (favorite is { } f) n.Flags = f ? n.Flags | ContactFlags.Favorite : n.Flags & ~ContactFlags.Favorite;
+            if (lastAdvert is { } a) n.LastAdvert = a;
+            if (path is not null) { n.Path = path; n.PathLen = path.Length == 0 ? (byte)0xFF : (byte)path.Length; }
+            n.LastModified = Now();
+        }
+    }
+
     /// <summary>Simulates the link dropping (for reconnect tests).</summary>
     public void SimulateDisconnect() => _ = DisconnectAsync();
+
+    /// <summary>Queues a direct message from a contact with the given text type and signals it (tests: e.g. a remote
+    /// CLI command another radio sent to this one).</summary>
+    public void ReceiveDirectMessageForTest(string fromName, string text, TextType textType = TextType.Plain)
+    {
+        lock (_lock)
+        {
+            QueueContactMessage(_nodes.First(x => x.Name == fromName), text, Now(), (byte)textType);
+            Push([0x83]);
+        }
+    }
+
+    /// <summary>The flags this radio stores for a contact (tests: e.g. its Remote CLI grant).</summary>
+    public ContactFlags ContactFlagsForTest(string name)
+    {
+        lock (_lock) return _nodes.First(x => x.Name == name).Flags;
+    }
 
     private void Push(byte[] frame) { if (IsConnected) _rx.Writer.TryWrite(frame); }
 
@@ -186,9 +240,9 @@ public sealed class SimulatedRadio : IMeshTransport
         {
             case CommandCode.AppStart: Push(SelfInfoFrame()); break;
             case CommandCode.DeviceQuery:
-                Push(new ByteWriter(0x0D, 10).U8(40 / 2 * 5).U8(40).U32(_blePin)
+                Push(new ByteWriter(0x0D, FirmwareCode).U8(40 / 2 * 5).U8(40).U32(_blePin)
                     .Raw("29 Sep 2026"u8.ToArray().PaddedOrTruncated(12)).Raw("Demo Radio (simulated)"u8.ToArray().PaddedOrTruncated(40))
-                    .Raw("v1.16.0-sim"u8.ToArray().PaddedOrTruncated(20)).U8(0).U8(_pathHashMode).ToArray());
+                    .Raw("v1.18.0-sim"u8.ToArray().PaddedOrTruncated(20)).U8(0).U8(_pathHashMode).ToArray());
                 break;
             case CommandCode.GetBattery: Push(new ByteWriter(0x0C).U16((ushort)(3950 + _rng.Next(-20, 20))).U32(128).U32(1024).ToArray()); break;
             case CommandCode.GetTime: Push(new ByteWriter(0x09).U32(Now()).ToArray()); break;
@@ -211,7 +265,12 @@ public sealed class SimulatedRadio : IMeshTransport
             case CommandCode.SetCustomVar: Push(Ok); break;
             case CommandCode.ExportPrivateKey: Push(new byte[] { 0x0E }.Concat(_selfPriv64).ToArray()); break;
             case CommandCode.ImportPrivateKey: Push(Ok); break;
-            case CommandCode.Reboot: PushLater(200, () => { _ = DisconnectAsync(); return null; }); break;
+            case CommandCode.Reboot: ApplyWifiOnReboot(); PushLater(200, () => { _ = DisconnectAsync(); return null; }); break;
+            case CommandCode.RunCliCommand:
+                // Firmware takes CMD 66 only from v14 and when the frame has at least two command bytes.
+                if (FirmwareCode < 14 || c.Length < 3) { Push(Err(ErrorCode.UnsupportedCommand)); break; }
+                HandleRadioCli(Encoding.UTF8.GetString(c, 1, c.Length - 1));
+                break;
             case CommandCode.FactoryReset: Push(Ok); break;
             case CommandCode.GetStats:
                 Push(c[1] switch
@@ -233,6 +292,7 @@ public sealed class SimulatedRadio : IMeshTransport
                 Push(byKey is null ? Err(ErrorCode.NotFound) : new byte[] { 0x03 }.Concat(ContactFrame(byKey)).ToArray());
                 break;
             case CommandCode.UpdateContact:
+                if (c.Length < 36) { Push(Err(ErrorCode.IllegalArgument)); break; }
                 var key = c.Slice(1, 32);
                 var node = _nodes.FirstOrDefault(n => n.PublicKey.SequenceEquals(key));
                 if (node is null)
@@ -242,10 +302,12 @@ public sealed class SimulatedRadio : IMeshTransport
                     _nodes.Add(node);
                 }
                 node.InContacts = true;
-                node.Flags = (ContactFlags)c[34];
+                if (!IgnoreContactFlagChangesForTest) node.Flags = (ContactFlags)c[34];
                 node.PathLen = c[35];
                 node.Path = node.PathLen == 0xFF ? [] : c.Slice(36, PathEncoding.Decode(node.PathLen)?.ByteLength ?? 0);
-                node.LastModified = Now();
+                if (c.Length >= PacketBuilder.UpdateContactFrameSize) { node.Lat = c.ReadInt32LE(136) / 1e6; node.Lon = c.ReadInt32LE(140) / 1e6; }
+                node.LastModified = Now(); // last_mod is never taken from the frame (144 < 148)
+                LastContactUpdateLength = c.Length;
                 Push(Ok);
                 break;
             case CommandCode.RemoveContact:
@@ -352,6 +414,7 @@ public sealed class SimulatedRadio : IMeshTransport
         var flood = node.PathLen == 0xFF;
         Push(new ByteWriter(0x06, flood ? (byte)1 : (byte)0).Raw(ack).U32(flood ? 6000u : 3000u).ToArray());
         if (isCli) { HandleCli(node, text); return; }
+        if (c[1] == (byte)TextType.CliCommand) { HandleRemoteRadioCli(node, text); return; }
         // "Bob" is out of range on first attempt to exercise retries; everyone else ACKs promptly.
         if (node.Name == "Bob" && attempt == 0) return;
         PushLater(400 + _rng.Next(600), () => new byte[] { 0x82 }.Concat(ack).Concat(BitConverter.GetBytes((uint)(500 + _rng.Next(900)))).ToArray());
@@ -507,17 +570,156 @@ public sealed class SimulatedRadio : IMeshTransport
         });
     }
 
+    // MARK: Firmware 1.18 radio CLI (CMD 66 and TXT_TYPE_CLI_COMMAND)
+
+    private static byte[] CliReplyFrame(string text) => new byte[] { 0x1D }.Concat(Encoding.UTF8.GetBytes(text)).ToArray();
+
+    private static bool IsVerb(string lower, string verb) => lower == verb || lower.StartsWith(verb + " ");
+
+    private void HandleRadioCli(string line)
+    {
+        var lower = line.Trim().ToLowerInvariant();
+        if (IsVerb(lower, "poweroff") || IsVerb(lower, "shutdown"))
+        {
+            if (!SupportsPowerOff) { Push(CliReplyFrame("ERROR: power off not supported on this board")); return; }
+            PoweredOff = true; // the board goes down without a reply
+            PushLater(150, () => { _ = DisconnectAsync(); return null; });
+            return;
+        }
+        if (IsVerb(lower, "reboot")) { ApplyWifiOnReboot(); PushLater(200, () => { _ = DisconnectAsync(); return null; }); return; }
+        Push(CliReplyFrame(LocalCliReply(line)));
+    }
+
+    private void ApplyWifiOnReboot()
+    {
+        _wifiActive = _wifiEnabled && _wifiSsid.Length > 0;
+        _wifiActiveSsid = _wifiSsid;
+    }
+
+    private static (string Verb, string Key, string? Value) SplitCli(string line)
+    {
+        var t = line.TrimStart();
+        var sp = t.IndexOf(' ');
+        var verb = (sp < 0 ? t : t[..sp]).ToLowerInvariant();
+        if (sp < 0) return (verb, "", null);
+        var rest = t[(sp + 1)..];
+        var sp2 = rest.IndexOf(' ');
+        return sp2 < 0 ? (verb, rest.Trim(), null) : (verb, rest[..sp2], rest[(sp2 + 1)..]); // value verbatim
+    }
+
+    private string ClockText() =>
+        DateTimeOffset.FromUnixTimeSeconds(Now()).UtcDateTime.ToString("H:mm - d/M/yyyy", System.Globalization.CultureInfo.InvariantCulture) + " UTC";
+
+    private string RadioText() => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{_freq:0.000},{_bw:0.0},{_sf},{_cr}");
+
+    /// <summary>Replies like the companion firmware's CommonCLI: "&gt; value" for get, "OK…" for set, "??: key" for an
+    /// unknown get key, "Unknown command" for an unknown verb.</summary>
+    private string LocalCliReply(string line)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var (verb, key, value) = SplitCli(line);
+        switch (verb)
+        {
+            case "ver": return "v1.18.0-sim (Build: 29-Sep-2026)";
+            case "board": return "Demo Radio (simulated)";
+            case "clock": return ClockText();
+            case "get":
+                return key.ToLowerInvariant() switch
+                {
+                    "name" => "> " + _name,
+                    "radio" => "> " + RadioText(),
+                    "tx" => "> " + _tx.ToString(inv),
+                    "lat" => "> " + _lat.ToString("0.000000", inv),
+                    "lon" => "> " + _lon.ToString("0.000000", inv),
+                    "public.key" => "> " + _selfPub.ToHex(),
+                    RadioCliKey.TimezoneOffset => "> " + _tzOffset.ToString(inv),
+                    RadioCliKey.WifiEnabled => "> " + (_wifiEnabled ? "1" : "0"),
+                    RadioCliKey.WifiSsid => "> " + (_wifiSsid.Length == 0 ? RadioCliReply.NotSet : _wifiSsid),
+                    RadioCliKey.WifiPassword => "> " + _wifiPwd,
+                    RadioCliKey.WifiStatus => "> " + (_wifiActive ? "connected" : "disconnected"),
+                    RadioCliKey.WifiIp => "> " + (_wifiActive ? "192.168.4.42" : RadioCliReply.NotConnected),
+                    var k when _cliVars.TryGetValue(k, out var v) => "> " + v,
+                    _ => RadioCliReply.UnknownGetPrefix + key,
+                };
+            case "set":
+                switch (key.ToLowerInvariant())
+                {
+                    case "name": _name = value ?? ""; return "OK";
+                    case "tx" when sbyte.TryParse(value, inv, out var tx): _tx = tx; return "OK";
+                    case "lat" when double.TryParse(value, inv, out var la): _lat = la; return "OK";
+                    case "lon" when double.TryParse(value, inv, out var lo): _lon = lo; return "OK";
+                    case RadioCliKey.TimezoneOffset:
+                        if (!int.TryParse(value, System.Globalization.NumberStyles.AllowLeadingSign, inv, out var tz) || tz is < -12 or > 14)
+                            return "Error, range is -12 to 14";
+                        _tzOffset = tz;
+                        return "OK";
+                    case RadioCliKey.WifiEnabled:
+                        if (value?.Trim() is not ("0" or "1")) return "Error, must be 0 or 1";
+                        _wifiEnabled = value.Trim() == "1";
+                        return "OK - reboot to apply";
+                    case RadioCliKey.WifiSsid:
+                        var n = Encoding.UTF8.GetByteCount(value ?? "");
+                        if (n is < 1 or > 32) return "Error, bad ssid";
+                        _wifiSsid = value!;
+                        return "OK - reboot to apply";
+                    case RadioCliKey.WifiPassword:
+                        if (Encoding.UTF8.GetByteCount(value ?? "") > 63) return "Error, password too long";
+                        _wifiPwd = value ?? "";
+                        return "OK - reboot to apply";
+                    case RadioCliKey.WifiClear: _wifiSsid = ""; _wifiPwd = ""; return "OK - reboot to apply";
+                    case RadioCliKey.WifiStatus or RadioCliKey.WifiIp or "public.key": return "unknown config: " + key;
+                    case "": return "Unknown command";
+                    default: _cliVars[key.ToLowerInvariant()] = value ?? ""; return "OK";
+                }
+            default: return "Unknown command";
+        }
+    }
+
+    /// <summary>A contact's companion radio running a remote CLI command (TXT_TYPE_CLI_COMMAND). Only contacts in
+    /// <see cref="RemoteCliGrantedBy"/> run it; the reply comes back as a CLI-data DM with the echoed wire prefix.</summary>
+    private void HandleRemoteRadioCli(Node node, string text)
+    {
+        if (FirmwareCode < 14 || node.Type != ContactType.Chat || !RemoteCliGrantedBy.Contains(node.Name)) return;
+        string? prefix = null;
+        var body = text;
+        if (CliResponse.SplitEchoedPrefix(text) is { } s) { prefix = s.Prefix; body = s.Body; }
+        var lower = body.Trim().ToLowerInvariant();
+        if (IsVerb(lower, "poweroff") || IsVerb(lower, "shutdown") || IsVerb(lower, "reboot")) return; // no reply
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var (verb, key, _) = SplitCli(body);
+        var reply = verb switch
+        {
+            "ver" => "v1.18.0 (Build: 29-Sep-2026)",
+            "board" => "Heltec V3",
+            "clock" => ClockText(),
+            "get" => key.ToLowerInvariant() switch
+            {
+                "name" => "> " + node.Name,
+                "radio" => "> " + RadioText(),
+                "lat" => "> " + node.Lat.ToString("0.000000", inv),
+                "lon" => "> " + node.Lon.ToString("0.000000", inv),
+                RadioCliKey.TimezoneOffset => "> 0",
+                RadioCliKey.WifiEnabled => "> 0",
+                _ => RadioCliReply.UnknownGetPrefix + key,
+            },
+            "set" when key.Length > 0 => "OK",
+            _ => "Unknown command",
+        };
+        PushLater(700, () =>
+        {
+            lock (_lock) QueueContactMessage(node, (prefix ?? "") + reply, Now(), (byte)TextType.CliData);
+            return [0x83];
+        });
+    }
+
     private void HandlePathDiscovery(byte[] key)
     {
         var node = _nodes.FirstOrDefault(n => n.PublicKey.SequenceEquals(key));
         if (node is null) { Push(Err(ErrorCode.NotFound)); return; }
         Push(new ByteWriter(0x06, 1).Raw(RandomNumberGenerator.GetBytes(4)).U32(3000).ToArray());
         var hop = _nodes[2].PublicKey[0];
-        PushLater(1500, () =>
-        {
-            lock (_lock) { node.PathLen = 1; node.Path = [hop]; node.LastModified = Now(); }
-            return new ByteWriter(0x8D, 0).Raw(key.Prefix(6)).U8(1).U8(hop).U8(1).U8(hop).ToArray();
-        });
+        // Like the firmware, the response only reports the path: the contact keeps its stored one until the app writes it.
+        PushLater(1500, () => new ByteWriter(0x8D, 0).Raw(key.Prefix(6)).U8(1).U8(hop).U8(1).U8(hop).ToArray());
     }
 
     private void HandleTrace(byte[] c)

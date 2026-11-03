@@ -6,7 +6,9 @@
              xmlns:conv="using:MC1.Windows.Converters"
              x:Class="MC1.Windows.Views.NodeManagementView"
              x:DataType="vm:NodeManagementViewModel">
-  <DockPanel>
+  <!-- The dialog shows the node's kept workspace (requests keep running after the dialog closes). -->
+  <Panel DataContext="{Binding Admin}">
+  <DockPanel x:DataType="vm:RemoteAdminWorkspace">
     <!-- Header -->
     <Border DockPanel.Dock="Top" Background="{DynamicResource App.Surface}" BorderBrush="{DynamicResource App.Border}" BorderThickness="0,0,0,1" Padding="20,14">
       <Grid ColumnDefinitions="Auto,*,Auto">
@@ -221,6 +223,8 @@
                     <TextBox Grid.Column="1" Text="{Binding SetFloodAdvertInterval}" VerticalAlignment="Center" />
                     <Button Grid.Column="2" Content="{l:T 'Apply'}" Margin="8,0,0,0" Command="{Binding ApplyFloodAdvertIntervalCommand}" VerticalAlignment="Center" />
                   </Grid>
+                  <TextBlock Classes="caption" Margin="14,0,14,6" TextWrapping="Wrap" IsVisible="{Binding HiddenFromDiscovery}"
+                             Text="{l:T 'With both advert intervals set to 0, this repeater won\'t respond to the discovery ping.'}" />
                   <Grid ColumnDefinitions="220,*,Auto" Classes="setting" IsVisible="{Binding IsRepeater}">
                     <TextBlock Classes="label" Text="{l:T 'Max flood hops'}" />
                     <TextBox Grid.Column="1" Text="{Binding SetFloodMax}" VerticalAlignment="Center" />
@@ -304,4 +308,5 @@
       </TabItem>
     </TabControl>
   </DockPanel>
+  </Panel>
 </UserControl>

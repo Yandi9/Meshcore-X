@@ -28,6 +28,8 @@ public sealed partial class TracePathViewModel : ToolPage
         _main = main;
         var reload = new Debouncer(TimeSpan.FromMilliseconds(150), Reload);
         OnData(c => { if (c.Kind is DataKind.Contacts or DataKind.TracePaths or DataKind.Radio) reload.Trigger(); });
+        // Leaving the page keeps a batch running; only rebuilding the UI (a language change) retires this one.
+        Track(() => { _runGeneration++; _cts?.Cancel(); });
     }
 
     public ObservableCollection<ContactRecord> Repeaters { get; } = new();
@@ -83,6 +85,7 @@ public sealed partial class TracePathViewModel : ToolPage
 
     public void StartWith(ContactRecord c)
     {
+        StopRun();
         Reload();
         Hops.Clear();
         AddHop(c);
@@ -139,6 +142,7 @@ public sealed partial class TracePathViewModel : ToolPage
     [RelayCommand]
     private void ClearHops()
     {
+        StopRun();
         Hops.Clear();
         Results.Clear();
         BatchRuns.Clear();
@@ -167,41 +171,75 @@ public sealed partial class TracePathViewModel : ToolPage
         DistanceText = pts.Count >= 2 ? L.F("Outbound distance ≈ {0}", Formatters.Distance(total)) : null;
     }
 
+    /// <summary>
+    /// Bumped by every new run and every stop. A trace (or a whole batch) keeps running while the user is on another
+    /// page, but once it is stopped or replaced nothing it was waiting for is published any more.
+    /// </summary>
+    private int _runGeneration;
+
+    private static double WorstSnr(TraceRunResult r) => r.Hops.Count == 0 ? 0 : r.Hops.Min(h => h.Snr);
+
     [RelayCommand]
     private async Task Run()
     {
         if (Hops.Count == 0) { Status = L.T("Add at least one repeater to the path."); return; }
         if (!Core.IsConnected) { Status = L.T("Connect to your radio first."); return; }
-        _cts = new CancellationTokenSource();
+        _cts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _cts = cts;
+        var generation = ++_runGeneration;
+        bool Current() => generation == _runGeneration && !cts.IsCancellationRequested;
         IsRunning = true;
         Results.Clear();
         BatchRuns.Clear();
         BatchSummary = null;
         HasResult = false;
         var path = FullPath();
+        var hashMode = (byte)HashMode;
+        var count = BatchCount;
         var successes = new List<TraceRunResult>();
         try
         {
-            for (var run = 1; run <= BatchCount && !_cts.IsCancellationRequested; run++)
+            for (var run = 1; run <= count && Current(); run++)
             {
-                Status = BatchCount > 1 ? L.F("Tracing… run {0} of {1}", run, BatchCount) : L.T("Tracing…");
-                var r = await Core.Tools.RunTraceAsync(path, (byte)HashMode, _cts.Token);
+                Status = count > 1 ? L.F("Tracing… run {0} of {1}", run, count) : L.T("Tracing…");
+                var r = await Core.Tools.RunTraceAsync(path, hashMode, cts.Token);
+                // Stopped (or replaced) while waiting for the reply: drop it.
+                if (!Current())
+                {
+                    if (generation == _runGeneration) Status = L.T("Trace cancelled.");
+                    return;
+                }
                 _lastResult = r;
                 if (r.Success) successes.Add(r);
-                if (BatchCount > 1)
-                    BatchRuns.Add(new TraceBatchRun(run, r.Success, r.RoundTripMs, r.Success ? L.F("{0} ms · min SNR {1:0.#} dB", r.RoundTripMs, r.Hops.Min(h => h.Snr)) : r.Error ?? L.T("failed")));
+                if (count > 1)
+                    BatchRuns.Add(new TraceBatchRun(run, r.Success, r.RoundTripMs, r.Success ? L.F("{0} ms · min SNR {1:0.#} dB", r.RoundTripMs, WorstSnr(r)) : r.Error ?? L.T("failed")));
                 ShowResult(r);
-                if (run < BatchCount) await Task.Delay(TimeSpan.FromSeconds(2), _cts.Token);
+                if (run < count) await Task.Delay(TimeSpan.FromSeconds(2), cts.Token);
             }
-            if (BatchCount > 1)
+            if (count > 1 && Current())
             {
-                BatchSummary = successes.Count == 0 ? L.Plural(BatchCount, "0 / {0} trace succeeded", "0 / {0} traces succeeded")
-                    : L.F("{0} / {1} succeeded · avg {2:0} ms · avg worst-hop SNR {3:0.#} dB", successes.Count, BatchCount, successes.Average(s => s.RoundTripMs), successes.Average(s => s.Hops.Min(h => h.Snr)));
+                BatchSummary = successes.Count == 0 ? L.Plural(count, "0 / {0} trace succeeded", "0 / {0} traces succeeded")
+                    : L.F("{0} / {1} succeeded · avg {2:0} ms · avg worst-hop SNR {3:0.#} dB", successes.Count, count, successes.Average(s => s.RoundTripMs), successes.Average(WorstSnr));
             }
         }
-        catch (OperationCanceledException) { Status = L.T("Trace cancelled."); }
-        catch (Exception ex) { Status = L.F("Trace failed: {0}", ex.Message); }
-        finally { IsRunning = false; _cts = null; }
+        catch (OperationCanceledException) { if (generation == _runGeneration) Status = L.T("Trace cancelled."); }
+        catch (Exception ex) { if (generation == _runGeneration) Status = L.F("Trace failed: {0}", ex.Message); }
+        finally
+        {
+            if (generation == _runGeneration) { IsRunning = false; _cts = null; }
+        }
+    }
+
+    /// <summary>Stops a running trace or batch for good (a new path replaces the one being traced).</summary>
+    private void StopRun()
+    {
+        if (!IsRunning) return;
+        _runGeneration++;
+        _cts?.Cancel();
+        _cts = null;
+        IsRunning = false;
+        Status = null;
     }
 
     private void ShowResult(TraceRunResult r)
@@ -235,6 +273,7 @@ public sealed partial class TracePathViewModel : ToolPage
     [RelayCommand]
     private void LoadPath(TracePathRecord p)
     {
+        StopRun();
         Hops.Clear();
         Results.Clear();
         HasResult = false;

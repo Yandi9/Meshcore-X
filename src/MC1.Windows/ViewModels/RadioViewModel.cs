@@ -30,10 +30,44 @@ public sealed partial class RadioViewModel : ViewModelBase
         _reload = new Debouncer(TimeSpan.FromMilliseconds(250), Reload);
         OnStatus(_reload.Trigger);
         OnData(c => { if (c.Kind == DataKind.Radio) _reload.Trigger(); });
-        Presets = RadioPresets.PresetsForCurrentLocale();
+        Area = new PresetAreaPicker();
+        _presets = RadioPresets.PresetsFor(Area.Selection);
+        Area.Changed += OnPresetAreaChanged;
     }
 
-    public IReadOnlyList<RadioPreset> Presets { get; }
+    /// <summary>Every preset, those of the user's country (recommended first) at the top.</summary>
+    [ObservableProperty] private IReadOnlyList<RadioPreset> _presets;
+
+    /// <summary>Where the user is, for the preset recommendation (Canada → province, as on the iPhone).</summary>
+    public PresetAreaPicker Area { get; }
+
+    /// <summary>The recommended preset differs from the radio's: offer to switch to it.</summary>
+    [ObservableProperty] private bool _canUseRecommended;
+
+    private void OnPresetAreaChanged()
+    {
+        var keep = SelectedPreset?.Id;
+        _loading = true;
+        try
+        {
+            Presets = RadioPresets.PresetsFor(Area.Selection);
+            SelectedPreset = keep is null ? null : Presets.FirstOrDefault(p => p.Id == keep);
+        }
+        finally { _loading = false; }
+        // Presets with the same settings (USA / Canada) are told apart by the area too.
+        Reload();
+    }
+
+    private void UpdateRecommendation(RadioPreset? onRadio, bool repeating) =>
+        CanUseRecommended = IsConnected && !repeating && Area.Recommended is { } r && r.Id != onRadio?.Id;
+
+    [RelayCommand]
+    private void UseRecommendedPreset()
+    {
+        if (Area.Recommended is not { } r || Presets.FirstOrDefault(p => p.Id == r.Id) is not { } preset) return;
+        if (SelectedPreset?.Id == preset.Id) { _ = ApplyPickedPresetAsync(preset); return; }
+        SelectedPreset = preset; // puts the radio on it (after confirming), like picking it in the list
+    }
     public IReadOnlyList<RadioPreset> RepeatPresets => RadioPresets.RepeatPresets;
     public IReadOnlyList<OcvPresets.Preset> OcvOptions => OcvPresets.All;
     public IReadOnlyList<double> Bandwidths { get; } = [7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125, 250, 500];
@@ -43,6 +77,11 @@ public sealed partial class RadioViewModel : ViewModelBase
     public IReadOnlyList<string> TelemetryModes { get; } = [L.T("Off"), L.T("Trusted contacts only"), L.T("Everyone")];
     public ObservableCollection<CustomVarRow> CustomVars { get; } = new();
     public ObservableCollection<KnownRadioRow> KnownRadios { get; } = new();
+    /// <summary>Firmware 1.18 sections: Bluetooth/WiFi links, radio WiFi, remote CLI grants, power off.</summary>
+    public RadioDeviceSectionsViewModel Sections { get; } = new();
+    /// <summary>Auto-add filters / max hops (detected from the firmware code, then the version text).</summary>
+    [ObservableProperty] private bool _supportsAutoAddConfig;
+    [ObservableProperty] private bool _supportsAutoAddMaxHops;
     public ObservableCollection<DetailRow> Stats { get; } = new();
 
     [ObservableProperty] private bool _isConnected;
@@ -128,7 +167,8 @@ public sealed partial class RadioViewModel : ViewModelBase
             BatteryText = core.Battery is { } b ? $"{core.BatteryPercent}% · {b.Level / 1000.0:0.00} V" : "–";
             StorageText = core.Battery is { UsedStorageKB: { } used, TotalStorageKB: { } total } ? L.F("{0:N0} KB of {1:N0} KB used", used, total) : "";
             ConnectionText = core.CurrentTarget?.Describe() ?? L.T("Not connected");
-            KnownRegions = string.Join(", ", core.RxLog.KnownRegions());
+            // Saved regions show as soon as they are known (also on the first visit), without wiping an edit in progress.
+            KnownRegions = Sync(nameof(KnownRegions), KnownRegions, string.Join(", ", core.RxLog.KnownRegions()));
 
             KnownRadios.Clear();
             foreach (var r in core.Db.GetRadios().OrderByDescending(r => r.LastConnected)) KnownRadios.Add(new KnownRadioRow(r, r.Id == core.RadioId));
@@ -158,12 +198,15 @@ public sealed partial class RadioViewModel : ViewModelBase
                 ? L.F("The radio is in repeat mode: {0}", RadioPresets.Describe(RadioPresets.MatchingRepeat(s.RadioFrequency), s.RadioFrequency, s.RadioBandwidth, s.RadioSpreadingFactor, s.RadioCodingRate))
                 : L.F("On the radio now: {0}", RadioPresets.Describe(match, s.RadioFrequency, s.RadioBandwidth, s.RadioSpreadingFactor, s.RadioCodingRate));
             CurrentPresetName = repeating ? L.T("Repeat mode") : match?.Name ?? L.T("Custom");
+            UpdateRecommendation(match, repeating);
             MaxTxPower = s.MaxTxPower > 0 ? s.MaxTxPower : 22;
             MinTxPower = PacketBuilder.TxPowerFloor;
             TxPower = Sync(nameof(TxPower), TxPower, (int)s.TxPower);
             SupportsRepeat = caps is { FirmwareVersion: >= 9 };
             RepeatEnabled = caps?.ClientRepeat ?? false;
             AutoAddEnabled = !s.ManualAddContacts;
+            SupportsAutoAddConfig = RadioFeatures.SupportsAutoAddConfig(caps);
+            SupportsAutoAddMaxHops = RadioFeatures.SupportsAutoAddMaxHops(caps);
             TelemetryBase = Math.Min(2, (int)s.TelemetryModeBase);
             TelemetryLocation = Math.Min(2, (int)s.TelemetryModeLocation);
             TelemetryEnvironment = Math.Min(2, (int)s.TelemetryModeEnvironment);
@@ -382,6 +425,7 @@ public sealed partial class RadioViewModel : ViewModelBase
     public void OnShown()
     {
         Reload();
+        Sections.OnShown();
         if (!Core.IsConnected || _refreshing) return;
         _refreshing = true;
         _ = Task.Run(async () =>
@@ -445,7 +489,8 @@ public sealed partial class RadioViewModel : ViewModelBase
         await Run(async () =>
         {
             await Core.Device.SetOtherParamsAsync(c => c.ManualAddContacts = !AutoAddEnabled);
-            try { await Core.Device.SetAutoAddAsync(new AutoAddConfig(mask, (byte)Math.Clamp(AutoAddMaxHops, 0, 63))); } catch (MeshCoreException) { /* older firmware: only the manual flag */ }
+            if (SupportsAutoAddConfig)
+                try { await Core.Device.SetAutoAddAsync(new AutoAddConfig(mask, (byte)(SupportsAutoAddMaxHops ? Math.Clamp(AutoAddMaxHops, 0, 63) : 0))); } catch (MeshCoreException) { /* older firmware: only the manual flag */ }
         }, L.T("Contact settings"), L.T("Contact settings saved."));
     }
 
@@ -514,6 +559,8 @@ public sealed partial class RadioViewModel : ViewModelBase
     private void SaveKnownRegions()
     {
         Core.RxLog.SetKnownRegions(KnownRegions.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        ForgetEdits(nameof(KnownRegions));
+        Reload();
         Message = L.T("Known regions saved (used to label region-scoped packets).");
     }
 

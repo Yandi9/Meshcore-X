@@ -89,8 +89,13 @@ public sealed partial class ChannelInfoViewModel : ViewModelBase
 
     public ChannelInfoViewModel(ChannelRecord channel)
     {
+        // What is saved now (the chat may hold an older copy, e.g. from before a pin from the chat list).
+        channel = Core.Db.GetChannel(channel.RadioId, channel.Idx) ?? channel;
         _channel = channel;
         Name = channel.Name;
+        _revertingPin = true;
+        IsPinned = channel.IsPinned;
+        _revertingPin = false;
         ShareUri = ChannelService.ShareUri(channel);
         Qr = QrService.Render(ShareUri);
         NotificationLevel = (NotificationLevel)channel.NotificationLevel;
@@ -116,9 +121,29 @@ public sealed partial class ChannelInfoViewModel : ViewModelBase
     [ObservableProperty] private string _scopeRegion;
     [ObservableProperty] private bool _showSecret;
     [ObservableProperty] private string? _message;
+    /// <summary>Pinned at the top of the chat list (this PC only).</summary>
+    [ObservableProperty] private bool _isPinned;
     public Action? Close { get; set; }
 
     partial void OnNotificationLevelChanged(NotificationLevel value) => Core.Channels.SetNotificationLevel(_channel, value);
+
+    private bool _revertingPin;
+
+    partial void OnIsPinnedChanged(bool value)
+    {
+        if (_revertingPin) return;
+        try
+        {
+            Core.Channels.SetPinned(_channel, value);
+            Message = null;
+        }
+        catch (Exception ex)
+        {
+            Message = ex.Message;
+            _revertingPin = true;
+            try { IsPinned = !value; } finally { _revertingPin = false; }
+        }
+    }
 
     [RelayCommand]
     private void SaveScope()
@@ -159,7 +184,12 @@ public sealed partial class RoomInfoViewModel : ViewModelBase
 
     public RoomInfoViewModel(RemoteSessionRecord room)
     {
+        // What is saved now (the chat may hold an older copy of the session).
+        room = Core.Db.GetRemoteSession(room.Id) ?? room;
         _room = room;
+        _revertingPin = true;
+        IsPinned = room.IsPinned;
+        _revertingPin = false;
         Name = room.Name;
         Status = !room.IsConnected ? L.T("Not signed in") : room.PermissionLevel switch
         {
@@ -179,14 +209,31 @@ public sealed partial class RoomInfoViewModel : ViewModelBase
     public bool IsAdmin { get; }
     [ObservableProperty] private bool _hasSavedPassword;
     [ObservableProperty] private NotificationLevel _notificationLevel;
+    /// <summary>Pinned at the top of the chat list (this PC only).</summary>
+    [ObservableProperty] private bool _isPinned;
+    [ObservableProperty] private string? _message;
     public IReadOnlyList<NotificationLevel> Levels { get; } = Enum.GetValues<NotificationLevel>();
     public Action? Close { get; set; }
 
-    partial void OnNotificationLevelChanged(NotificationLevel value)
+    partial void OnNotificationLevelChanged(NotificationLevel value) => Core.Rooms.SetNotificationLevel(_room, value);
+
+    private bool _revertingPin;
+
+    partial void OnIsPinnedChanged(bool value)
     {
-        _room.NotificationLevel = (int)value;
-        Core.Db.UpsertRemoteSession(_room);
-        Core.Notify(DataKind.Conversations);
+        if (_revertingPin) return;
+        try
+        {
+            Core.Messages.SetPinned(MessageService.RoomKey(_room.Id), value);
+            _room.IsPinned = value;
+            Message = null;
+        }
+        catch (Exception ex)
+        {
+            Message = ex.Message;
+            _revertingPin = true;
+            try { IsPinned = !value; } finally { _revertingPin = false; }
+        }
     }
 
     [RelayCommand]

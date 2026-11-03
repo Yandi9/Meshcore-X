@@ -75,6 +75,7 @@ public static class PacketParser
                     : Fail(p, $"AutoAddConfig response too short: {p.Length} < 1"),
                 ResponseCode.AllowedRepeatFreq => Parsers.ParseAllowedRepeatFreq(p),
                 ResponseCode.DefaultFloodScope => Parsers.ParseDefaultFloodScope(p),
+                ResponseCode.CliReply => new MeshEvent.CliReply(p.TrimAtNull().TryDecodeUtf8() ?? ""),
                 ResponseCode.ContactStart => p.Length >= PacketSize.ContactsStartMinimum
                     ? new MeshEvent.ContactsStart((int)p.ReadUInt32LE(0))
                     : Fail(p, $"ContactStart response too short: {p.Length} < {PacketSize.ContactsStartMinimum}"),
@@ -557,6 +558,7 @@ public static class Parsers
         if (d.Length < 4) return new NeighboursResponse(prefix, tag, 0, []);
         int total = d.ReadInt16LE(0);
         int results = d.ReadInt16LE(2);
+        if (total < 0 || results < 0) return new NeighboursResponse(prefix, tag, 0, []);
         var list = new List<Neighbour>();
         var entry = prefixLength + 5;
         var o = 4;
@@ -603,6 +605,20 @@ public static class Parsers
             list.Add(new MmaEntry(ch, t.DisplayName(), min, max, avg));
         }
         return list;
+    }
+
+    /// <summary>Parses an MMA binary reply: [server clock u32][entries…]. Returns null when the clock is truncated.</summary>
+    public static IReadOnlyList<MmaEntry>? ParseMmaReply(byte[] d) =>
+        d.Length < 4 ? null : ParseMma(d.From(4));
+
+    /// <summary>Parses an owner-info reply: UTF-8 "&lt;firmware&gt;\n&lt;node name&gt;\n&lt;owner info&gt;", stopping at the
+    /// first NUL so encryption padding stays out of the text.</summary>
+    public static OwnerInfoResponse ParseOwnerInfo(byte[] d)
+    {
+        var bytes = d.TrimAtNull();
+        var text = bytes.TryDecodeUtf8() ?? bytes.DecodeUtf8Lossy();
+        var parts = text.Split('\n', 3);
+        return new OwnerInfoResponse(parts.ElementAtOrDefault(0) ?? "", parts.ElementAtOrDefault(1) ?? "", parts.ElementAtOrDefault(2) ?? "");
     }
 
     public static IReadOnlyList<string> ParseRegions(byte[] d)

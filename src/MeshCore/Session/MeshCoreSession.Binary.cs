@@ -36,21 +36,32 @@ public sealed partial class MeshCoreSession
         RequireFullKey(publicKey, "requestOwnerInfo");
         return WithSerialization(() => PerformBinaryExchangeAsync<OwnerInfoResponse>(
             PacketBuilder.BinaryRequest(publicKey, BinaryRequestType.OwnerInfo), "Owner info", null,
-            (payload, _) =>
-            {
-                var parts = Encoding.UTF8.GetString(payload).Split('\n', 3);
-                return new OwnerInfoResponse(parts.ElementAtOrDefault(0) ?? "", parts.ElementAtOrDefault(1) ?? "", parts.ElementAtOrDefault(2) ?? "");
-            }, ct), ct);
+            (payload, _) => Parsers.ParseOwnerInfo(payload), ct), ct);
     }
 
+    /// <summary>
+    /// Min/max/average sensor history. The firmware takes the range as whole seconds <i>ago</i> (start exclusive, end
+    /// inclusive; future dates clamp to 0) and replies [server clock u32][entries…].
+    /// </summary>
     public Task<MmaResponse> RequestMmaAsync(byte[] publicKey, DateTimeOffset start, DateTimeOffset end, CancellationToken ct = default)
     {
         RequireFullKey(publicKey, "requestMMA");
-        var payload = new ByteWriter().U32(Bytes.EpochSeconds32(start)).U32(Bytes.EpochSeconds32(end)).Raw([0, 0]).ToArray();
+        var payload = BuildMmaRequestPayload(start, end, DateTimeOffset.UtcNow);
         var prefix = publicKey.Prefix(6);
         return WithSerialization(() => PerformBinaryExchangeAsync<MmaResponse>(
             PacketBuilder.BinaryRequest(publicKey, BinaryRequestType.Mma, payload), "MMA", null,
-            (p, tag) => new MmaResponse(prefix, tag, Parsers.ParseMma(p)), ct), ct);
+            (p, tag) => Parsers.ParseMmaReply(p) is { } entries ? new MmaResponse(prefix, tag, entries) : null, ct), ct);
+    }
+
+    internal static byte[] BuildMmaRequestPayload(DateTimeOffset start, DateTimeOffset end, DateTimeOffset now)
+    {
+        static uint SecondsAgo(DateTimeOffset now, DateTimeOffset date)
+        {
+            var seconds = (now - date).TotalSeconds;
+            if (!double.IsFinite(seconds) || seconds <= 0) return 0;
+            return seconds >= uint.MaxValue ? uint.MaxValue : (uint)seconds;
+        }
+        return new ByteWriter().U32(SecondsAgo(now, start)).U32(SecondsAgo(now, end)).Raw([0, 0]).ToArray();
     }
 
     public Task<AclResponse> RequestAclAsync(byte[] publicKey, CancellationToken ct = default)
@@ -93,19 +104,25 @@ public sealed partial class MeshCoreSession
     }
 
     /// <summary>Asks a repeater which regions it allows (anonymous request).</summary>
+    /// <summary>
+    /// Asks a repeater which regions it allows (anonymous request). Region requests need a direct out path, so a
+    /// flood-routed contact is temporarily set to zero-hop direct (raw type byte preserved) and flood routing is
+    /// restored afterwards — also when the caller cancels during the temporary write (a stopped session skips the
+    /// restore because it can no longer write).
+    /// </summary>
     public async Task<IReadOnlyList<string>> RequestRegionsAsync(MeshContact contact, CancellationToken ct = default)
     {
         var isFlood = contact.OutPathLength == 0xFF;
-        if (isFlood) await AddContactAsync(contact with { OutPathLength = 0, OutPath = [] }, ct).ConfigureAwait(false);
         try
         {
+            if (isFlood) await AddContactAsync(contact with { OutPathLength = 0, OutPath = [] }, ct).ConfigureAwait(false);
             return await WithSerialization(() => PerformBinaryExchangeAsync<IReadOnlyList<string>>(
                 PacketBuilder.SendAnonReq(contact.PublicKey, AnonRequestType.Regions, isFlood ? (byte)0 : contact.OutPathLength, isFlood ? [] : contact.OutPath),
                 "Regions", null, (p, _) => Parsers.ParseRegions(p), ct), ct).ConfigureAwait(false);
         }
         finally
         {
-            if (isFlood) { try { await ResetPathAsync(contact.PublicKey, CancellationToken.None).ConfigureAwait(false); } catch { /* best effort */ } }
+            if (isFlood && _isRunning) { try { await ResetPathAsync(contact.PublicKey, CancellationToken.None).ConfigureAwait(false); } catch { /* best effort */ } }
         }
     }
 
@@ -144,7 +161,7 @@ public sealed partial class MeshCoreSession
                 bool has;
                 try { has = await sub.Reader.WaitToReadAsync(waitCts.Token).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested) { continue; }
-                if (!has) throw new MeshCoreException(MeshCoreErrorKind.ConnectionLost);
+                if (!has) throw StoppedOr(new MeshCoreException(MeshCoreErrorKind.ConnectionLost));
                 while (sub.Reader.TryRead(out var e))
                 {
                     switch (e)
@@ -178,7 +195,7 @@ public sealed partial class MeshCoreSession
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            throw MeshCoreException.Timeout();
+            throw StoppedOr(MeshCoreException.Timeout());
         }
     }
 }

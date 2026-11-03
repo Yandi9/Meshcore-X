@@ -148,6 +148,23 @@ public sealed class RoomService(MeshApp app)
         return c?.DisplayName ?? Convert.ToHexString(prefix);
     }
 
+    public void SetNotificationLevel(RemoteSessionRecord room, NotificationLevel level)
+    {
+        room.NotificationLevel = (int)level;
+        app.Db.SetRemoteSessionNotificationLevel(room.Id, level);
+        app.Notify(DataKind.Sessions, room.Id);
+        app.Notify(DataKind.Conversations);
+        // Muted rooms don't count towards the unread totals.
+        app.Messages.UpdateBadge();
+    }
+
+    /// <summary>Keeps unsent text for the room's message box (null clears it).</summary>
+    public void SaveDraft(RemoteSessionRecord room, string? draft)
+    {
+        room.DraftText = draft;
+        app.Db.SetRoomDraft(room.Id, draft);
+    }
+
     public void ClearHistory(RemoteSessionRecord room)
     {
         app.Db.ClearRoomMessages(room.Id);

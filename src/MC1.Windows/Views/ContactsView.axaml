@@ -10,12 +10,27 @@
   <Grid x:Name="Split" ColumnDefinitions="360,*">
     <Border Classes="pane">
       <DockPanel>
-        <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto,Auto,Auto" Margin="16,14,10,6">
+        <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto,Auto,Auto,Auto" Margin="16,14,10,6">
           <TextBlock Classes="pagetitle" Text="{l:T 'Contacts'}" VerticalAlignment="Center" />
-          <Button Grid.Column="1" Classes="icon" ToolTip.Tip="{l:T 'Share my contact (QR)'}" Command="{Binding ShowMyCardCommand}">
+          <Button Grid.Column="1" Classes="icon" ToolTip.Tip="{l:T 'Sort'}" IsVisible="{Binding IsContactsSegment}">
+            <PathIcon Data="{StaticResource Icon.SortVariant}" />
+            <Button.Flyout>
+              <MenuFlyout>
+                <MenuItem Header="{l:T 'Last advert'}" ToggleType="Radio" IsChecked="{Binding SortByLastHeard, Mode=OneWay}"
+                          Command="{Binding SetSortCommand}" CommandParameter="{x:Static m:NodeSortOrder.LastHeard}" />
+                <MenuItem Header="{l:T 'Name'}" ToggleType="Radio" IsChecked="{Binding SortByName, Mode=OneWay}"
+                          Command="{Binding SetSortCommand}" CommandParameter="{x:Static m:NodeSortOrder.Name}" />
+                <MenuItem Header="{l:T 'Distance'}" ToggleType="Radio" IsChecked="{Binding SortByDistance, Mode=OneWay}"
+                          Command="{Binding SetSortCommand}" CommandParameter="{x:Static m:NodeSortOrder.Distance}" />
+                <MenuItem Header="{l:T 'Hops'}" ToggleType="Radio" IsChecked="{Binding SortByHops, Mode=OneWay}"
+                          Command="{Binding SetSortCommand}" CommandParameter="{x:Static m:NodeSortOrder.Hops}" />
+              </MenuFlyout>
+            </Button.Flyout>
+          </Button>
+          <Button Grid.Column="2" Classes="icon" ToolTip.Tip="{l:T 'Share my contact (QR)'}" Command="{Binding ShowMyCardCommand}">
             <PathIcon Data="{StaticResource Icon.Qrcode}" />
           </Button>
-          <Button Grid.Column="2" Classes="icon" ToolTip.Tip="{l:T 'Send advert'}">
+          <Button Grid.Column="3" Classes="icon" ToolTip.Tip="{l:T 'Send advert'}">
             <PathIcon Data="{StaticResource Icon.Broadcast}" />
             <Button.Flyout>
               <MenuFlyout>
@@ -24,7 +39,7 @@
               </MenuFlyout>
             </Button.Flyout>
           </Button>
-          <Button Grid.Column="3" Classes="icon" ToolTip.Tip="{l:T 'More'}">
+          <Button Grid.Column="4" Classes="icon" ToolTip.Tip="{l:T 'More'}">
             <PathIcon Data="{StaticResource Icon.DotsVertical}" />
             <Button.Flyout>
               <MenuFlyout>
@@ -61,7 +76,34 @@
           <ListBox Classes="plain" ItemsSource="{Binding Contacts}" SelectedItem="{Binding Selected}" IsVisible="{Binding IsContactList}">
             <ListBox.ItemTemplate>
               <DataTemplate x:DataType="vm:ContactRow">
-                <Grid ColumnDefinitions="Auto,*,Auto">
+                <Grid ColumnDefinitions="Auto,*,Auto" Background="Transparent">
+                  <Grid.ContextMenu>
+                    <ContextMenu>
+                      <MenuItem Header="{l:T 'Message'}" IsVisible="{Binding CanMessage}"
+                                Command="{Binding $parent[UserControl].((vm:ContactsViewModel)DataContext).MessageRowCommand}" CommandParameter="{Binding}">
+                        <MenuItem.Icon><PathIcon Classes="small" Data="{StaticResource Icon.MessageTextOutline}" /></MenuItem.Icon>
+                      </MenuItem>
+                      <MenuItem Header="{l:T 'Block'}" IsVisible="{Binding CanBlock}"
+                                Command="{Binding $parent[UserControl].((vm:ContactsViewModel)DataContext).ToggleBlockRowCommand}" CommandParameter="{Binding}">
+                        <MenuItem.Icon><PathIcon Classes="small" Data="{StaticResource Icon.Cancel}" /></MenuItem.Icon>
+                      </MenuItem>
+                      <MenuItem Header="{l:T 'Favorite'}" IsVisible="{Binding !IsFavorite}"
+                                IsEnabled="{Binding $parent[UserControl].((vm:ContactsViewModel)DataContext).IsRadioReady}"
+                                Command="{Binding $parent[UserControl].((vm:ContactsViewModel)DataContext).ToggleFavoriteRowCommand}" CommandParameter="{Binding}">
+                        <MenuItem.Icon><PathIcon Classes="small" Data="{StaticResource Icon.StarOutline}" /></MenuItem.Icon>
+                      </MenuItem>
+                      <MenuItem Header="{l:T 'Unfavorite'}" IsVisible="{Binding IsFavorite}"
+                                IsEnabled="{Binding $parent[UserControl].((vm:ContactsViewModel)DataContext).IsRadioReady}"
+                                Command="{Binding $parent[UserControl].((vm:ContactsViewModel)DataContext).ToggleFavoriteRowCommand}" CommandParameter="{Binding}">
+                        <MenuItem.Icon><PathIcon Classes="small" Data="{StaticResource Icon.Star}" /></MenuItem.Icon>
+                      </MenuItem>
+                      <Separator />
+                      <MenuItem Header="{l:T 'Remove contact…'}"
+                                Command="{Binding $parent[UserControl].((vm:ContactsViewModel)DataContext).RemoveRowCommand}" CommandParameter="{Binding}">
+                        <MenuItem.Icon><PathIcon Classes="small" Data="{StaticResource Icon.DeleteOutline}" Foreground="{DynamicResource App.Danger}" /></MenuItem.Icon>
+                      </MenuItem>
+                    </ContextMenu>
+                  </Grid.ContextMenu>
                   <ctl:Avatar Size="36" Emoji="{Binding Emoji}" IconKey="{Binding IconKey}" Color="{Binding Color}" />
                   <StackPanel Grid.Column="1" Margin="10,0,6,0" VerticalAlignment="Center">
                     <StackPanel Orientation="Horizontal" Spacing="4">
@@ -80,6 +122,8 @@
               </DataTemplate>
             </ListBox.ItemTemplate>
           </ListBox>
+          <TextBlock Classes="hint" Text="{Binding EmptyText}" TextWrapping="Wrap" TextAlignment="Center" HorizontalAlignment="Center"
+                     VerticalAlignment="Top" Margin="20,24" IsVisible="{Binding EmptyText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
           <!-- "Blocked" bubble -->
           <ScrollViewer IsVisible="{Binding IsBlockedFilter}">
             <StackPanel Margin="14,0,14,14">

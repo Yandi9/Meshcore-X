@@ -29,6 +29,8 @@ public sealed class AppSettings
     public bool AutoReconnect { get; set; } = true;
     public bool ConnectOnLaunch { get; set; } = true;
     public string BluetoothPin { get; set; } = "123456";
+    /// <summary>Radio id → its Bluetooth and WiFi links, so either can be used (switch, reconnect). Empty in older settings.</summary>
+    public Dictionary<string, SavedRadioLinks> RadioLinks { get; set; } = new();
 
     // Appearance
     /// <summary>The app's language ("es", "zh-Hans", …); null follows Windows' display language.</summary>
@@ -67,6 +69,12 @@ public sealed class AppSettings
     public bool MapShowRepeaters { get; set; } = true;
     public bool MapShowRooms { get; set; } = true;
     public bool MapShowDiscovered { get; set; } = true;
+    /// <summary>The map's advanced filters (last heard, hops).</summary>
+    public MC1.Core.Maps.MapAdvancedFilter MapFilter { get; set; } = new();
+    /// <summary>An offline map download that hasn't finished (resumed after a restart unless the user paused it).</summary>
+    public MC1.Core.Maps.OfflineMapDownloadJob? OfflineMapDownload { get; set; }
+    /// <summary>Order of the contacts list.</summary>
+    public MC1.Core.Models.NodeSortOrder ContactsSortOrder { get; set; } = MC1.Core.Models.NodeSortOrder.LastHeard;
     public bool UseMetricUnits { get; set; } = true;
 
     // Location
@@ -124,8 +132,18 @@ public sealed class AppSettings
     /// <summary>Radio id → the preset last applied from this app (to tell apart presets with the same settings).</summary>
     public Dictionary<string, string> AppliedRadioPresets { get; set; } = new();
 
+    /// <summary>Where the user is, for radio preset recommendations (ISO country, e.g. "CA"); null uses this PC's country.</summary>
+    public string? PresetCountry { get; set; }
+    /// <summary>The state or province (ISO 3166-2, e.g. "CA-BC") for preset recommendations; null when not picked.</summary>
+    public string? PresetArea { get; set; }
+
     /// <summary>Radio id → radio settings before repeat mode was switched on ("freqMHz,bwKHz,sf,cr"), restored when it's switched off.</summary>
     public Dictionary<string, string> PreRepeatRadio { get; set; } = new();
+
+    /// <summary>The user's state or region CoreScope (MeshCore network analyzer); shown in its own tab when set.</summary>
+    public string? CoreScopeUrl { get; set; }
+    /// <summary>The CoreScope site's own name ("Colorado Mesh"), read from the site; null until it's known.</summary>
+    public string? CoreScopeName { get; set; }
 }
 
 /// <summary>Custom look of one conversation. Colours are "#RRGGBB" / "#AARRGGBB"; null means "use the app theme".</summary>

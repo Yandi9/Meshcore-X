@@ -60,6 +60,8 @@ public sealed class ContactRecord
     public long LastHeard { get; set; }
     public int? InboundHops { get; set; }
     public string? DraftText { get; set; }
+    /// <summary>The chat is pinned on this PC (separate from the radio's favourite flag).</summary>
+    public bool IsPinned { get; set; }
 
     public ContactType ContactType => Enum.IsDefined(typeof(ContactType), (byte)Type) ? (ContactType)(byte)Type : MeshCore.ContactType.Chat;
     public ContactFlags ContactFlags => (ContactFlags)(byte)Flags;
@@ -130,6 +132,8 @@ public sealed class ChannelRecord
     public int NotificationLevel { get; set; }
     public string? FloodScope { get; set; }
     public string? DraftText { get; set; }
+    /// <summary>The channel is pinned in the chat list on this PC.</summary>
+    public bool IsPinned { get; set; }
 
     public bool IsPublic => Secret.AsSpan().SequenceEqual(ChannelSecrets.PublicChannelSecret);
     public bool IsHashtag => Name.StartsWith('#');
@@ -257,6 +261,10 @@ public sealed class RemoteSessionRecord
     public long LastActivity { get; set; }
     public int NotificationLevel { get; set; }
     public long LastLogin { get; set; }
+    /// <summary>The room is pinned in the chat list on this PC.</summary>
+    public bool IsPinned { get; set; }
+    /// <summary>Unsent text in the room's message box.</summary>
+    public string? DraftText { get; set; }
 
     public bool IsAdmin => Permission == (int)RoomPermission.Admin;
     public bool CanPost => Permission >= (int)RoomPermission.ReadWrite;

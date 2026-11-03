@@ -14,6 +14,32 @@ public sealed class MapStyle
     public List<string> SourceTiles { get; } = new();
     public int SourceMaxZoom { get; private set; } = 14;
 
+    /// <summary>The style this one was made from by <see cref="WithLabelLanguage"/> (itself for a parsed style).</summary>
+    public MapStyle Base { get; private set; }
+
+    public MapStyle() => Base = this;
+
+    /// <summary>
+    /// A copy whose place names prefer <paramref name="languageCode"/> (falling back to the local name), like the
+    /// iPhone app. Only the stock OpenMapTiles name labels change; road numbers keep their own text.
+    /// </summary>
+    public MapStyle WithLabelLanguage(string languageCode)
+    {
+        var copy = new MapStyle { SourceUrl = SourceUrl, SourceMaxZoom = SourceMaxZoom, Base = Base };
+        copy.SourceTiles.AddRange(SourceTiles);
+        foreach (var layer in Layers)
+        {
+            if (layer.Type == "symbol" && MC1.Core.Maps.MapLabelLocalizer.Localize(layer.Layout["text-field"], layer.Source, languageCode) is { } text)
+            {
+                var layout = (JsonObject)layer.Layout.DeepClone();
+                layout["text-field"] = text;
+                copy.Layers.Add(layer.With(layout));
+            }
+            else copy.Layers.Add(layer);
+        }
+        return copy;
+    }
+
     public static MapStyle Parse(string json, string sourceDomain = "tiles.openfreemap.org")
     {
         json = json.Replace("__TILEJSON_DOMAIN__", sourceDomain);
@@ -41,6 +67,7 @@ public sealed class MapStyle
                 {
                     Id = (string?)l["id"] ?? "",
                     Type = type,
+                    Source = (string?)l["source"],
                     SourceLayer = (string?)l["source-layer"],
                     MinZoom = l["minzoom"] is JsonValue mn ? (double)mn : 0,
                     MaxZoom = l["maxzoom"] is JsonValue mx ? (double)mx : 24,
@@ -59,6 +86,8 @@ public sealed class StyleLayer
     public string Id { get; init; } = "";
     public string Type { get; init; } = "";
     public string? SourceLayer { get; init; }
+    /// <summary>The style source the layer draws ("openmaptiles").</summary>
+    public string? Source { get; init; }
     public double MinZoom { get; init; }
     public double MaxZoom { get; init; } = 24;
     public JsonNode? Filter { get; init; }
@@ -67,6 +96,13 @@ public sealed class StyleLayer
     public bool Visible { get; init; } = true;
 
     public bool ShowsAt(double zoom) => Visible && zoom >= MinZoom && zoom < MaxZoom;
+
+    /// <summary>The same layer with another layout.</summary>
+    public StyleLayer With(JsonObject layout) => new()
+    {
+        Id = Id, Type = Type, SourceLayer = SourceLayer, Source = Source, MinZoom = MinZoom, MaxZoom = MaxZoom,
+        Filter = Filter, Paint = Paint, Layout = layout, Visible = Visible,
+    };
 }
 
 /// <summary>Evaluates MapLibre style expressions, legacy filters and zoom functions.</summary>

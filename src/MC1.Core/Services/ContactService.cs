@@ -36,22 +36,61 @@ public sealed class ContactService(MeshApp app)
         _ => L.T("Companion"),
     };
 
+    /// <summary>
+    /// A path discovery response: the path is written to the radio's contact (the radio doesn't keep it by itself,
+    /// so the next contact sync would otherwise bring the old one back), and saved here once the radio accepted it.
+    /// </summary>
     internal void HandlePathDiscovery(PathInfo p)
     {
         var radioId = app.RadioId;
         if (radioId is null) return;
         var c = app.Db.GetContactByPrefix(radioId, p.PublicKeyPrefix);
         if (c is null) return;
-        c.OutPathLength = p.OutPathLength;
-        c.OutPath = p.OutPath;
-        c.LastHeard = Time.Now();
-        app.Db.UpsertContact(c);
-        app.Log.Info("Contacts", $"Path discovery for {c.DisplayName}: {(p.OutPath.Length == 0 ? "direct" : string.Join("→", PathEncoding.HopHexes(p.OutPath, PathEncoding.Decode(p.OutPathLength)?.HashSize ?? 1)))}");
-        app.Notify(DataKind.Contacts, c.Id);
-        PathDiscovered?.Invoke(c, p);
+        app.Db.TouchContactHeard(radioId, c.PublicKey, Time.Now());
+        if (p.OutHopCount is null)
+        {
+            // A reserved length byte: nothing that can be written.
+            app.Notify(DataKind.Contacts, c.Id);
+            PathDiscovered?.Invoke(app.Db.GetContact(c.Id) ?? c, p);
+            return;
+        }
+        _ = Task.Run(() => StoreDiscoveredPathAsync(c, p));
     }
 
+    private async Task StoreDiscoveredPathAsync(ContactRecord c, PathInfo p)
+    {
+        var route = p.OutHopCount == 0 ? "direct" : string.Join("→", PathEncoding.HopHexes(p.OutPath, PathEncoding.Decode(p.OutPathLength)?.HashSize ?? 1));
+        try
+        {
+            var saved = await app.RunContactOperationAsync(async () =>
+            {
+                var session = app.RequireSession();
+                var current = app.Db.GetContact(c.Id) ?? c;
+                var length = PathEncoding.Decode(p.OutPathLength)?.ByteLength ?? 0;
+                var path = p.OutPath.Length > length ? p.OutPath[..length] : p.OutPath;
+                // The response's own length byte (zero hops stays direct), and the stored type byte.
+                var written = current.ToMeshContact() with { OutPathLength = p.OutPathLength, OutPath = path };
+                await session.UpdateContactAsync(written).ConfigureAwait(false);
+                var confirmed = await session.GetContactAsync(current.PublicKey).ConfigureAwait(false) ?? written;
+                return app.Db.SaveContactFrame(current.RadioId, confirmed);
+            }).ConfigureAwait(false);
+            app.Log.Info("Contacts", $"Path discovery for {saved.DisplayName}: {route} (saved on the radio)");
+            app.Notify(DataKind.Contacts, saved.Id);
+            PathDiscovered?.Invoke(saved, p);
+        }
+        catch (Exception ex)
+        {
+            app.Log.Warn("Contacts", $"Path discovery for {c.DisplayName}: {route}, but the radio didn't save it: {ex.Message}");
+            app.Notify(DataKind.Contacts, c.Id);
+            PathDiscoveryFailed?.Invoke(c, p, ex.Message);
+        }
+    }
+
+    /// <summary>A discovered path was saved on the radio (raised on a background thread).</summary>
     public event Action<ContactRecord, PathInfo>? PathDiscovered;
+
+    /// <summary>A path was discovered but the radio rejected it (contact, path, error); the stored path is unchanged.</summary>
+    public event Action<ContactRecord, PathInfo, string>? PathDiscoveryFailed;
 
     /// <summary>Adds a node to the radio's contact table (from discovery, QR/URI or a shared token).</summary>
     public async Task<ContactRecord> AddAsync(byte[] publicKey, string name, ContactType type, double lat = 0, double lon = 0, byte outPathLength = 0xFF, byte[]? outPath = null)
@@ -104,14 +143,28 @@ public sealed class ContactService(MeshApp app)
         app.Notify(DataKind.Conversations);
     }
 
-    public async Task SetFavoriteAsync(ContactRecord c, bool favorite)
+    /// <summary>
+    /// Marks a contact as a favourite (or not) on the radio, reads it back to confirm, and only then saves it here.
+    /// Runs one at a time with contact syncs, so a sync in flight can't undo it. Returns the saved contact.
+    /// </summary>
+    public async Task<ContactRecord> SetFavoriteAsync(ContactRecord c, bool favorite)
     {
-        var flags = favorite ? c.ContactFlags | ContactFlags.Favorite : c.ContactFlags & ~ContactFlags.Favorite;
         var session = app.RequireSession();
-        await session.ChangeContactFlagsAsync(c.ToMeshContact(), flags).ConfigureAwait(false);
-        c.Flags = (int)flags;
-        app.Db.UpsertContact(c);
+        var saved = await app.RunContactOperationAsync(async () =>
+        {
+            var current = app.Db.GetContact(c.Id) ?? c;
+            var flags = favorite ? current.ContactFlags | ContactFlags.Favorite : current.ContactFlags & ~ContactFlags.Favorite;
+            await session.ChangeContactFlagsAsync(current.ToMeshContact(), flags).ConfigureAwait(false);
+            var confirmed = await session.GetContactAsync(current.PublicKey).ConfigureAwait(false)
+                ?? throw new MessageServiceException(L.T("The contact is no longer on the radio."));
+            if (confirmed.Flags.HasFlag(ContactFlags.Favorite) != favorite)
+                throw new MessageServiceException(L.T("The radio didn't confirm the change. Try again."));
+            return app.Db.SaveContactFrame(current.RadioId, confirmed);
+        }).ConfigureAwait(false);
+        c.Flags = saved.Flags;
         app.Notify(DataKind.Contacts, c.Id);
+        app.Notify(DataKind.Conversations);
+        return saved;
     }
 
     public async Task SetTelemetryPermissionsAsync(ContactRecord c, ContactFlags telemetryFlags)
@@ -167,8 +220,9 @@ public sealed class ContactService(MeshApp app)
         var session = app.RequireSession();
         if (await session.GetContactAsync(c.PublicKey).ConfigureAwait(false) is { } fresh)
         {
+            // Applied to the stored row, so local fields changed meanwhile (unread count, draft) aren't overwritten.
+            app.Db.SaveContactFrame(c.RadioId, fresh);
             c.ApplyFrom(fresh);
-            app.Db.UpsertContact(c);
             app.Notify(DataKind.Contacts, c.Id);
         }
         return c;

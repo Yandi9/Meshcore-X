@@ -21,8 +21,12 @@ public sealed partial class BleDeviceRow : ObservableObject
     public string AddressText => Address.Length == 12 ? string.Join(":", Enumerable.Range(0, 6).Select(i => Address.Substring(i * 2, 2))) : Address;
 }
 
-public sealed record RecentConnectionRow(ConnectionTarget Target)
+/// <param name="Alternate">The same radio's other saved link (WiFi for Bluetooth and the reverse), when known.</param>
+public sealed record RecentConnectionRow(ConnectionTarget Target, ConnectionTarget? Alternate = null)
 {
+    public bool HasAlternate => Alternate is not null;
+    public string AlternateText => Alternate?.Kind == ConnectionKind.Bluetooth ? L.T("Connect over Bluetooth") : L.T("Connect over WiFi");
+    public string AlternateTip => Alternate?.Describe() ?? "";
     // The demo radio's stored display name stays English ("Demo radio"); it's shown in the app's language.
     public string Title => Target.Kind == ConnectionKind.Simulator && Target.DisplayName is null or "Demo radio" ? L.T("Demo radio") : Target.DisplayName ?? Target.Address;
     public string Subtitle => Target.Describe();
@@ -42,7 +46,7 @@ public sealed partial class ConnectViewModel : ViewModelBase
 
     public ConnectViewModel()
     {
-        foreach (var r in Core.Settings.Current.RecentConnections) Recent.Add(new RecentConnectionRow(r));
+        foreach (var r in Core.Settings.Current.RecentConnections) Recent.Add(new RecentConnectionRow(r, Core.AlternateLink(r)));
         HasRecent = Recent.Count > 0;
         RefreshPorts();
         BluetoothPin = Core.Settings.Current.BluetoothPin;
@@ -171,6 +175,36 @@ public sealed partial class ConnectViewModel : ViewModelBase
     [RelayCommand]
     private Task ConnectRecent(RecentConnectionRow row) => Connect(row.Target);
 
+    /// <summary>Connects a saved radio through its other link (Bluetooth or WiFi).</summary>
+    [RelayCommand]
+    private Task ConnectAlternate(RecentConnectionRow row) => row.Alternate is { } alt ? Connect(alt) : Task.CompletedTask;
+
+    // MARK: Pairing keeps failing (the iPhone's guidance, with the reflash step)
+
+    /// <summary>Bluetooth pairing failures per radio address since the app started.</summary>
+    private static readonly Dictionary<string, int> s_pairingFailures = new(StringComparer.OrdinalIgnoreCase);
+    private const int PairingFailuresBeforeHelp = 2;
+
+    /// <summary>Pairing with the same radio failed again: show how to remove the pairing and, if that doesn't help, reflash.</summary>
+    [ObservableProperty] private bool _showPairingHelp;
+
+    private void NotePairingResult(ConnectionTarget target, Exception? error)
+    {
+        if (target.Kind != ConnectionKind.Bluetooth) return;
+        if (error is null) { s_pairingFailures.Remove(target.Address); ShowPairingHelp = false; return; }
+        if (!IsPairingError(error)) return;
+        s_pairingFailures[target.Address] = s_pairingFailures.GetValueOrDefault(target.Address) + 1;
+        ShowPairingHelp = s_pairingFailures[target.Address] >= PairingFailuresBeforeHelp;
+    }
+
+    // Pairing errors are marked by the Bluetooth transport (their text may be translated); "pair" catches untranslated ones.
+    private static bool IsPairingError(Exception ex) =>
+        ex.Data.Contains(BluetoothErrors.PairingKey) || ex.Message.Contains("pair", StringComparison.OrdinalIgnoreCase);
+
+    [RelayCommand] private void OpenBluetoothSettings() => AppHost.Dialogs.OpenUrl("ms-settings:bluetooth");
+
+    [RelayCommand] private void OpenFlasher() => AppHost.Dialogs.OpenUrl("https://flasher.meshcore.io");
+
     [RelayCommand]
     private void RemoveRecent(RecentConnectionRow row)
     {
@@ -202,11 +236,13 @@ public sealed partial class ConnectViewModel : ViewModelBase
         try
         {
             await Core.ConnectAsync(target, _connectCts.Token);
+            NotePairingResult(target, null);
             if (!closed) { closed = true; Close?.Invoke(); }
         }
         catch (OperationCanceledException) { Status = null; }
         catch (Exception ex)
         {
+            NotePairingResult(target, ex);
             if (closed) AppHost.Main?.ShowToast(L.T("Connection problem"), ex.Message);
             else Error = Friendly(target, ex);
         }
@@ -229,8 +265,7 @@ public sealed partial class ConnectViewModel : ViewModelBase
                 L.T("The radio didn't answer. Make sure it runs MeshCore *companion USB* firmware (not repeater firmware)."),
             ConnectionKind.Tcp when ex is System.Net.Sockets.SocketException =>
                 L.F("Couldn't reach {0}:{1}. Check the radio is on the same network and runs companion WiFi firmware.", t.Address, t.Port),
-            // Pairing errors are marked by the Bluetooth transport (their text may be translated); "pair" catches untranslated ones.
-            ConnectionKind.Bluetooth when ex.Data.Contains(BluetoothErrors.PairingKey) || msg.Contains("pair", StringComparison.OrdinalIgnoreCase) =>
+            ConnectionKind.Bluetooth when IsPairingError(ex) =>
                 L.F("{0} Check the PIN shown on the radio's screen (default 123456).", msg),
             _ => msg,
         };

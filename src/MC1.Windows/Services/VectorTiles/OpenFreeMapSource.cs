@@ -26,6 +26,7 @@ public sealed class OpenFreeMapSource
     private readonly Dictionary<string, Task<VectorTile?>> _parsed = new();
     private readonly LinkedList<string> _parsedOrder = new();
     private MapStyle? _style;
+    private readonly Dictionary<string, MapStyle> _localized = new();
     private string? _tileTemplate;
     private int _maxZoom = 14;
 
@@ -38,10 +39,13 @@ public sealed class OpenFreeMapSource
 
     private static string Folder => Path.Combine(AppPaths.TileCache, "_openfreemap");
 
-    /// <summary>Renders the 256-px raster tile z/x/y as PNG bytes, or null when the data can't be had.</summary>
-    public async Task<byte[]?> RenderTileAsync(int z, int x, int y, bool offlineOnly, CancellationToken ct = default)
+    /// <summary>
+    /// Renders the 256-px raster tile z/x/y as PNG bytes, or null when the data can't be had. Place names are in
+    /// <paramref name="languageCode"/> (the app's language when null) where the map data has them.
+    /// </summary>
+    public async Task<byte[]?> RenderTileAsync(int z, int x, int y, bool offlineOnly, CancellationToken ct = default, string? languageCode = null)
     {
-        var style = await GetStyleAsync(offlineOnly, ct).ConfigureAwait(false);
+        var style = Localized(await GetStyleAsync(offlineOnly, ct).ConfigureAwait(false), languageCode ?? L.Code);
         var styleZoom = Math.Max(0, z - 1);
         var dataZ = Math.Min(styleZoom, _maxZoom);
         var k = z - dataZ;
@@ -55,6 +59,20 @@ public sealed class OpenFreeMapSource
     }
 
     // MARK: Style
+
+    /// <summary>The style with its place-name labels in a language (cached per language).</summary>
+    private MapStyle Localized(MapStyle style, string languageCode)
+    {
+        var lang = MC1.Core.Maps.MapLabelLocalizer.NameLanguage(languageCode);
+        if (lang == MC1.Core.Maps.MapLabelLocalizer.DefaultLanguageCode) return style;
+        lock (_localized)
+        {
+            if (_localized.TryGetValue(lang, out var cached) && ReferenceEquals(cached.Base, style)) return cached;
+            var localized = style.WithLabelLanguage(lang);
+            _localized[lang] = localized;
+            return localized;
+        }
+    }
 
     public async Task<MapStyle> GetStyleAsync(bool offlineOnly = false, CancellationToken ct = default)
     {
@@ -72,8 +90,7 @@ public sealed class OpenFreeMapSource
                 {
                     json = await _http.GetStringAsync(StyleUrl, ct).ConfigureAwait(false);
                     MapStyle.Parse(json); // validate before caching
-                    Directory.CreateDirectory(Folder);
-                    await File.WriteAllTextAsync(path, json, ct).ConfigureAwait(false);
+                    await TileService.WriteAtomicAsync(path, System.Text.Encoding.UTF8.GetBytes(json), ct).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException) { json = null; }
             }
@@ -108,8 +125,7 @@ public sealed class OpenFreeMapSource
             try
             {
                 json = await _http.GetStringAsync(url, ct).ConfigureAwait(false);
-                Directory.CreateDirectory(Folder);
-                await File.WriteAllTextAsync(path, json, ct).ConfigureAwait(false);
+                await TileService.WriteAtomicAsync(path, System.Text.Encoding.UTF8.GetBytes(json), ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -149,9 +165,26 @@ public sealed class OpenFreeMapSource
         return await Task.Run(() => MvtReader.Read(Ungzip(bytes)), ct).ConfigureAwait(false);
     }
 
+    private static string PbfPath(int z, int x, int y) => Path.Combine(Folder, "pbf", z.ToString(), x.ToString(), y + ".pbf");
+
+    /// <summary>Fetches the style and the tile address list now, so an offline download can be drawn without internet.</summary>
+    public async Task PrepareOfflineAsync(CancellationToken ct)
+    {
+        await GetStyleAsync(false, ct).ConfigureAwait(false);
+        if (await GetTileTemplateAsync(ct).ConfigureAwait(false) is null)
+            throw new HttpRequestException(L.T("The map server couldn't be reached."));
+    }
+
+    /// <summary>Makes sure the vector tile z/x/y is saved on this PC (downloads it when needed); false when it can't be had.</summary>
+    public async Task<bool> SaveVectorTileAsync(int z, int x, int y, CancellationToken ct)
+    {
+        if (File.Exists(PbfPath(z, x, y))) return true;
+        return await GetPbfAsync(z, x, y, false, ct).ConfigureAwait(false) is not null;
+    }
+
     private async Task<byte[]?> GetPbfAsync(int z, int x, int y, bool offlineOnly, CancellationToken ct)
     {
-        var path = Path.Combine(Folder, "pbf", z.ToString(), x.ToString(), y + ".pbf");
+        var path = PbfPath(z, x, y);
         if (File.Exists(path)) return await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
         if (offlineOnly) return null;
         var template = await GetTileTemplateAsync(ct).ConfigureAwait(false);
@@ -161,12 +194,13 @@ public sealed class OpenFreeMapSource
         {
             var url = template.Replace("{z}", z.ToString()).Replace("{x}", x.ToString()).Replace("{y}", y.ToString());
             using var resp = await _http.GetAsync(url, ct).ConfigureAwait(false);
-            // Empty ocean/desert tiles come back as 204 / empty: draw them as just the background.
-            if (resp.StatusCode is HttpStatusCode.NoContent or HttpStatusCode.NotFound) return [];
-            if (!resp.IsSuccessStatusCode) return null;
-            var bytes = await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            await File.WriteAllBytesAsync(path, bytes, ct).ConfigureAwait(false);
+            // Empty ocean/desert tiles come back as 204 / empty: draw them as just the background (and remember that
+            // offline too).
+            var bytes = resp.StatusCode is HttpStatusCode.NoContent or HttpStatusCode.NotFound ? []
+                : resp.IsSuccessStatusCode ? await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false)
+                : null;
+            if (bytes is null) return null;
+            await TileService.WriteAtomicAsync(path, bytes, ct).ConfigureAwait(false);
             return bytes;
         }
         finally { _downloads.Release(); }
@@ -186,6 +220,7 @@ public sealed class OpenFreeMapSource
     public void Reset()
     {
         lock (_parsed) { _parsed.Clear(); _parsedOrder.Clear(); }
+        lock (_localized) _localized.Clear();
         _style = null;
         _tileTemplate = null;
     }

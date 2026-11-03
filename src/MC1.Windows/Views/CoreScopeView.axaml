@@ -1,0 +1,90 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:l="using:MC1.Windows.Localization"
+             xmlns:vm="using:MC1.Windows.ViewModels"
+             x:Class="MC1.Windows.Views.CoreScopeView"
+             x:DataType="vm:CoreScopeViewModel">
+  <!-- The user's state or region CoreScope (MeshCore network analyzer), in the app's built-in browser. -->
+  <UserControl.Styles>
+    <!-- Back/Forward with nowhere to go: dimmed, without a button background -->
+    <Style Selector="Button.icon:disabled /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style Selector="Button.icon:disabled PathIcon">
+      <Setter Property="Opacity" Value="0.35" />
+    </Style>
+  </UserControl.Styles>
+  <DockPanel>
+    <Border DockPanel.Dock="Top" Background="{DynamicResource App.Surface}" BorderBrush="{DynamicResource App.Border}" BorderThickness="0,0,0,1">
+      <DockPanel>
+        <!-- Loading line: always takes its 3 pixels so the page doesn't jump while it loads -->
+        <Border DockPanel.Dock="Bottom" Height="3">
+          <ProgressBar IsIndeterminate="True" Height="3" MinHeight="3" CornerRadius="0" IsVisible="{Binding IsLoading}" />
+        </Border>
+        <Grid ColumnDefinitions="Auto,Auto,Auto,Auto,*,Auto,Auto" Margin="10,5,10,4">
+          <Button Classes="icon" Command="{Binding BackCommand}" ToolTip.Tip="{l:T 'Back'}">
+            <PathIcon Classes="small" Data="{StaticResource Icon.ArrowLeft}" />
+          </Button>
+          <Button Grid.Column="1" Classes="icon" Command="{Binding ForwardCommand}" ToolTip.Tip="{l:T 'Forward'}">
+            <PathIcon Classes="small" Data="{StaticResource Icon.ArrowRight}" />
+          </Button>
+          <Button Grid.Column="2" Classes="icon" Command="{Binding ReloadCommand}" ToolTip.Tip="{l:T 'Reload'}">
+            <PathIcon Classes="small" Data="{StaticResource Icon.Refresh}" />
+          </Button>
+          <Button Grid.Column="3" Classes="icon" Command="{Binding HomeCommand}" ToolTip.Tip="{l:T 'Back to the start page'}">
+            <PathIcon Classes="small" Data="{StaticResource Icon.HomeOutline}" />
+          </Button>
+          <StackPanel Grid.Column="4" Margin="12,0" VerticalAlignment="Center" Spacing="0">
+            <TextBlock Text="{Binding Heading}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+            <TextBlock Classes="caption" Text="{Binding HostLabel}" TextTrimming="CharacterEllipsis" />
+          </StackPanel>
+          <Button Grid.Column="5" Classes="link" Command="{Binding OpenInBrowserCommand}" Margin="0,0,12,0" VerticalAlignment="Center"
+                  ToolTip.Tip="{l:T 'Open this page in your web browser'}">
+            <StackPanel Orientation="Horizontal" Spacing="5">
+              <PathIcon Classes="small" Data="{StaticResource Icon.OpenInNew}" />
+              <TextBlock Text="{l:T 'Open in browser'}" />
+            </StackPanel>
+          </Button>
+          <Button Grid.Column="6" Classes="icon" ToolTip.Tip="{l:T 'More'}">
+            <PathIcon Classes="small" Data="{StaticResource Icon.DotsVertical}" />
+            <Button.Flyout>
+              <MenuFlyout Placement="BottomEdgeAlignedRight">
+                <MenuItem Header="{l:T 'Change link…'}" Command="{Binding ChangeLinkCommand}" />
+                <MenuItem Header="{l:T 'CoreScope settings'}" Command="{Binding OpenSettingsCommand}" />
+                <Separator />
+                <MenuItem Header="{l:T 'Remove CoreScope…'}" Command="{Binding RemoveCommand}" />
+              </MenuFlyout>
+            </Button.Flyout>
+          </Button>
+        </Grid>
+      </DockPanel>
+    </Border>
+
+    <Panel>
+      <!-- The built-in browser goes here -->
+      <Panel x:Name="BrowserArea" IsVisible="{Binding ShowBrowser}" />
+
+      <!-- The site couldn't be reached -->
+      <StackPanel Margin="32" MaxWidth="480" VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="8"
+                  IsVisible="{Binding LoadError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+        <PathIcon Data="{StaticResource Icon.AlertCircleOutline}" Width="36" Height="36" Foreground="{DynamicResource App.Warning}" HorizontalAlignment="Left" />
+        <TextBlock Text="{l:T 'CoreScope didn\'t load'}" FontSize="17" FontWeight="SemiBold" />
+        <TextBlock Classes="hint" Text="{Binding LoadError}" FontSize="13" />
+        <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,6,0,0">
+          <Button Classes="accent" Content="{l:T 'Retry'}" Command="{Binding RetryCommand}" />
+          <Button Content="{l:T 'Open in browser'}" Command="{Binding OpenInBrowserCommand}" />
+          <Button Content="{l:T 'Change link…'}" Command="{Binding ChangeLinkCommand}" />
+        </StackPanel>
+      </StackPanel>
+
+      <!-- No built-in browser on this PC -->
+      <StackPanel Margin="32" MaxWidth="480" VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="8"
+                  IsVisible="{Binding BrowserUnavailable, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+        <PathIcon Data="{StaticResource Icon.MonitorDashboard}" Width="36" Height="36" Foreground="{DynamicResource App.Accent}" HorizontalAlignment="Left" />
+        <TextBlock Text="{l:T 'Open CoreScope in your web browser'}" FontSize="17" FontWeight="SemiBold" />
+        <TextBlock Classes="hint" Text="{Binding BrowserUnavailable}" FontSize="13" />
+        <Button Classes="accent" Content="{l:T 'Open in browser'}" Command="{Binding OpenInBrowserCommand}" Margin="0,6,0,0" />
+      </StackPanel>
+    </Panel>
+  </DockPanel>
+</UserControl>

@@ -61,6 +61,8 @@ public enum CommandCode : byte
     SetDefaultFloodScope = 0x3F,
     GetDefaultFloodScope = 0x40,
     SendRawPacket = 0x41,
+    /// <summary>Runs a UTF-8 CLI command on the paired radio. Firmware v14+ (<c>CMD_RUN_CLI_COMMAND</c>).</summary>
+    RunCliCommand = 0x42,
 }
 
 /// <summary>Response and push codes received from the companion radio.</summary>
@@ -95,6 +97,8 @@ public enum ResponseCode : byte
     AllowedRepeatFreq = 0x1A,
     ChannelDataReceived = 0x1B,
     DefaultFloodScope = 0x1C,
+    /// <summary>UTF-8 reply to <see cref="CommandCode.RunCliCommand"/>. Firmware v14+.</summary>
+    CliReply = 0x1D,
 
     // Push notifications (0x80+)
     Advertisement = 0x80,
@@ -150,8 +154,11 @@ public enum StatsType : byte
 public enum TextType : byte
 {
     Plain = 0x00,
+    /// <summary>CLI command/reply for a repeater or room server.</summary>
     CliData = 0x01,
     Signed = 0x02,
+    /// <summary>Mesh CLI command for a contact's companion radio (firmware <c>TXT_TYPE_CLI_COMMAND</c>). Firmware v14+.</summary>
+    CliCommand = 0x03,
 }
 
 /// <summary>Firmware error codes carried by <see cref="ResponseCode.Error"/>.</summary>

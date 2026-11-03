@@ -96,6 +96,13 @@ window open) — this is the same switch as MeshCore under *Windows Settings →
 * Windows notifications with **quick reply** from the notification
 * Unread counts on every chat, contact and room, a total on the Chats button, and a red badge on the taskbar and
   tray icons (plus the window title)
+* **Pinned chats** — pin direct chats, channels and rooms (right-click a chat, or its info) to keep them in a *Pinned*
+  section at the top. Pins are kept on this PC, separate from the radio's contact favourites (contacts that were
+  favourites before 1.1.0 were pinned once, automatically)
+* **Mark as read / unread** from a chat's right-click menu
+* Unsent text is kept per chat — when you switch chats, restart, or the radio disconnects — and a direct message
+  interrupted by a disconnect is sent when the radio is back. While the radio's waiting messages are being fetched the
+  status bar says *Syncing messages…*
 * A **New Messages** line above the first message you haven't seen — when you open a chat, when you come back to the
   window after minimising it or closing it to the tray, and after restarting the app (it reopens the chat you had open)
 * The **+** button next to the message box: pick an emoji; **share your location** (this PC's, or the radio's
@@ -111,13 +118,26 @@ window open) — this is the same switch as MeshCore under *Windows Settings →
   every chat, and edit or reset any chat's look
 
 **Contacts** — filter bubbles like the Chats list (All, Companions, Repeaters, Rooms, Sensors, Favorites, and
-Blocked, which lists blocked contacts and channel senders to unblock), auto-discovered nodes, add from links / QR / codes, favourites, nicknames, share your contact as QR
-or link, zero-hop ping, telemetry request, per-contact telemetry permissions, path discovery / edit / reset.
+Blocked, which lists blocked contacts and channel senders to unblock), sorted by last advert (or by name, distance or
+hops), auto-discovered nodes, add from links / QR / codes, favourites (saved on the radio and confirmed by it),
+nicknames, share your contact as QR or link, zero-hop ping, telemetry request, per-contact telemetry permissions, path
+discovery (the path found is stored on the radio) / edit / reset, and **Remote commands** for other companion radios
+that let you run commands on them (firmware 1.18).
 
-**Map** — contact and discovered-node positions, standard / **dark** / satellite / topographic layers, offline map
-download for an area, path drawing, right-click for line-of-sight or setting your radio's position. The Dark layer is
+**Map** — contact and discovered-node positions, standard / **dark** / satellite / topographic layers, **filters** by
+last-heard time and hop count (presets or your own range, shown as chips you can click to change or remove), offline
+map download for the area in a frame with a choice of detail and a size estimate (downloads can be paused and resumed;
+not for the topographic layer), path drawing, right-click for line-of-sight or setting your radio's position. Place
+names on the Dark map are in the app's language where the map has them. The Dark layer is
 [OpenFreeMap](https://openfreemap.org)'s `dark` style (tiles.openfreemap.org/styles/dark): its vector tiles are drawn
 on your PC and cached, so it stays sharp when zoomed in.
+
+**CoreScope** — many states and regions run a [CoreScope](https://github.com/Kpa-clawbot/CoreScope), a web
+analyzer for their MeshCore mesh (live packets, map, nodes, channels, analytics). Paste its link in Settings ▸ General ▸
+CoreScope and click **Link**: a **CoreScope** tab appears in the sidebar (after Map; Ctrl+7) and shows the site in the
+app's built-in browser (Microsoft Edge WebView2). The page stays loaded while you use other tabs. Back, forward,
+reload, home and *Open in browser* are in its toolbar; the ⋮ menu changes or removes the link. Links to other sites
+open in your web browser. Remove the link and the tab goes away.
 
 **Tools**
 * **Trace Path** — pick repeaters, run single or repeated traces, SNR per hop, saved paths
@@ -125,11 +145,13 @@ on your PC and cached, so it stays sharp when zoomed in.
 * **RX Log** — every received packet, decoded and decrypted where possible, with hex dump and CSV export
 * **Noise Floor** — live noise floor / RSSI / SNR charts
 * **Node Discovery** — find repeaters, rooms and sensors in direct range
-* **CLI Terminal** — local commands for your radio and the firmware CLI of repeaters / rooms (history, completion)
+* **CLI Terminal** — your radio's own command line (firmware 1.18 and later; older firmware gets the app's emulation),
+  the firmware CLI of repeaters / rooms, and other companion radios that allow it (history, completion, sessions)
 
 **Remote node management** — sign in to repeaters and room servers; status, battery / noise / SNR history charts,
 telemetry, neighbours, access list, owner info, read and change settings (name, radio, TX power, repeat, advert
-intervals, flood hops, position, guest password…), clock sync, reboot, and an inline console.
+intervals, flood hops, position, guest password…), clock sync, reboot, and an inline console. Requests keep running
+when you close the window and their results are there when you open it again.
 
 **Radio** — everything is read from the connected radio (again each time you open the page), and the preset shows
 what the radio is set to — e.g. *USA* — using the same rules as the iPhone app (the preset you last applied, then
@@ -139,17 +161,24 @@ them. *Settings → General* shows the current preset too.
 Name, position (or this PC's location), adverts, radio presets and manual tuning, TX power, off-grid
 repeat mode, contact auto-add filters, telemetry sharing, battery chemistry (OCV curves), path hash size, tuning,
 Bluetooth PIN, default flood region, custom variables, private key export/import, statistics, reboot, factory reset.
+*Your area* (country and state/province) picks the recommended preset, like the iPhone app — e.g. *Canada: BC* in
+British Columbia. With firmware 1.18 and later: the radio's **WiFi** (network, password, on/off — applied after a
+reboot), **Power off**, **Remote CLI** (which contacts may run commands on your radio), and the radio's clock follows
+this PC's time zone. A radio you've used over both Bluetooth and WiFi can be **switched** between the two from the
+Radio page, *Settings → Connection* or the Connect window.
 
 **Settings** — one page per topic (General, Chats, Chat looks, Notifications, Backup & storage, Diagnostics, About)
 that rearranges itself for small windows: the radio's current preset, theme, a slim sidebar (Ctrl+B), start with Windows, chat and notification
 preferences, the lock screen status card and widget, backups, map cache, diagnostic log.
 
 **Backup & storage** — backups use the MeshCore One **.mc1backup** format and are named like
-`MC1 Backup 2026-09-30 012823.mc1backup`. A backup holds only your **messages, contacts, channels, saved paths and
-settings** (radio and app settings), for every radio you've used. Disconnect the radio first — *Back up*, *Restore*
-and *Export* are greyed out while it's connected. Restoring (from this app or from a phone backup) adds the contacts,
-channels, chats and paths to the app straight away; the radio settings, channels and contacts are written to the
-radio itself the next time you connect it (MeshCore asks first; *Write now* / *Discard* are in the same place).
+`MC1 Backup 2026-09-30 012823.mc1backup`. A backup holds only your **messages, contacts, channels, saved paths, pins and
+settings** (radio and app settings, including the radio's preset and frequency), for every radio you've used.
+*Back up* and *Export* need the radio disconnected. Restoring (from this app or from a phone backup) adds the contacts,
+channels, chats, pins and paths to the app straight away. The radio part — name, **preset and frequency**, channels and
+contacts — is written to the connected radio right away when you restore into it, or otherwise the next time you
+connect that radio (MeshCore asks first; *Write now* / *Discard* are in the same place). A backup never gives anyone
+permission to run commands on your radio.
 Backups can be saved to any folder you choose.
 
 **Sidebar** — the section bar on the left can be minimised to a slim icon strip with the button under the logo (or

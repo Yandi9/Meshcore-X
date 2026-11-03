@@ -4,13 +4,15 @@
              xmlns:vm="using:MC1.Windows.ViewModels"
              xmlns:svc="using:MC1.Windows.Services"
              xmlns:ctl="using:MC1.Windows.Controls"
+             xmlns:conv="using:MC1.Windows.Converters"
              x:Class="MC1.Windows.Views.MapView"
              x:DataType="vm:MapViewModel">
   <Panel>
     <ctl:MapControl x:Name="Map"
                     CenterLatitude="{Binding CenterLatitude}" CenterLongitude="{Binding CenterLongitude}" Zoom="{Binding Zoom}"
                     LayerId="{Binding LayerId}" Markers="{Binding Markers}" Lines="{Binding Lines}"
-                    SelectedMarker="{Binding SelectedMarker}" ShowLabels="{Binding ShowLabels}" Metric="{Binding Metric}" />
+                    SelectedMarker="{Binding SelectedMarker}" ShowLabels="{Binding ShowLabels}" Metric="{Binding Metric}"
+                    ShowSelection="{Binding ShowSelection}" SelectionInset="40,40,424,40" HighlightArea="{Binding DownloadArea}" />
 
     <!-- Top-left: search, layers, filters -->
     <Border Classes="card" Padding="10" Margin="14" HorizontalAlignment="Left" VerticalAlignment="Top" BoxShadow="0 4 14 0 #22000000" Width="300">
@@ -42,7 +44,16 @@
           <CheckBox Content="{l:T 'Discovered'}" IsChecked="{Binding ShowDiscovered}" Margin="0,0,10,0" />
           <CheckBox Content="{l:T 'Labels'}" IsChecked="{Binding ShowLabels}" />
         </WrapPanel>
-        <TextBlock Classes="tertiary" Text="{Binding Summary}" />
+        <Grid ColumnDefinitions="*,Auto">
+          <TextBlock Classes="tertiary" Text="{Binding Summary}" VerticalAlignment="Center" TextWrapping="Wrap" />
+          <Button Grid.Column="1" Classes="link" Command="{Binding ShowAdvancedFiltersCommand}" Margin="8,0,0,0"
+                  ToolTip.Tip="{l:T 'Filter by when nodes were last heard and how many hops away they are'}">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <PathIcon Classes="small" Data="{StaticResource Icon.FilterVariant}" />
+              <TextBlock Text="{l:T 'More Filters…'}" />
+            </StackPanel>
+          </Button>
+        </Grid>
       </StackPanel>
     </Border>
 
@@ -58,44 +69,91 @@
       </StackPanel>
     </Border>
 
-    <!-- Offline download panel -->
+    <!-- Offline download panel: saves the area inside the frame drawn on the map -->
     <Border Classes="card" Margin="0,14,70,14" Width="330" HorizontalAlignment="Right" VerticalAlignment="Top" BoxShadow="0 4 14 0 #22000000"
             IsVisible="{Binding IsDownloadPanelOpen}">
       <StackPanel Spacing="8">
         <Grid ColumnDefinitions="*,Auto">
           <TextBlock Classes="h3" Text="{l:T 'Offline maps'}" />
-          <Button Grid.Column="1" Classes="icon" Command="{Binding ToggleDownloadPanelCommand}"><PathIcon Classes="small" Data="{StaticResource Icon.Close}" /></Button>
+          <Button Grid.Column="1" Classes="icon" Command="{Binding ToggleDownloadPanelCommand}" ToolTip.Tip="{l:T 'Close'}"><PathIcon Classes="small" Data="{StaticResource Icon.Close}" /></Button>
         </Grid>
-        <TextBlock Classes="hint" Text="{l:T 'Download the visible area of the current layer so the map works without internet.'}" />
-        <Grid ColumnDefinitions="Auto,*,Auto,*" RowDefinitions="Auto">
-          <TextBlock Text="{l:T 'Zoom'}" VerticalAlignment="Center" Margin="0,0,8,0" />
-          <NumericUpDown Grid.Column="1" Minimum="1" Maximum="17" Value="{Binding DownloadMinZoom}" FormatString="0" Increment="1" />
-          <TextBlock Grid.Column="2" Text="{l:T 'to'}" VerticalAlignment="Center" Margin="8,0" />
-          <NumericUpDown Grid.Column="3" Minimum="1" Maximum="17" Value="{Binding DownloadMaxZoom}" FormatString="0" Increment="1" />
-        </Grid>
-        <TextBlock Classes="caption" Text="{Binding DownloadEstimate}" TextWrapping="Wrap" />
+        <StackPanel Spacing="8" IsVisible="{Binding LayerAllowsDownload}">
+          <TextBlock Classes="hint" TextWrapping="Wrap" Text="{l:T 'Saves the area inside the frame, for the current map layer, so the map works without internet.'}" />
+          <Grid ColumnDefinitions="Auto,*">
+            <TextBlock Text="{l:T 'Detail'}" VerticalAlignment="Center" Margin="0,0,10,0" />
+            <ComboBox Grid.Column="1" ItemsSource="{Binding DetailOptions}" SelectedItem="{Binding SelectedDetail}" HorizontalAlignment="Stretch"
+                      IsEnabled="{Binding !IsDownloading}">
+              <ComboBox.ItemTemplate>
+                <DataTemplate x:DataType="vm:MapDetailOption"><TextBlock Text="{Binding Name}" /></DataTemplate>
+              </ComboBox.ItemTemplate>
+            </ComboBox>
+          </Grid>
+          <TextBlock Classes="caption" TextWrapping="Wrap" Text="{l:T 'More detail uses more storage and takes longer to download. Lower detail lets you save larger areas.'}" />
+          <StackPanel Spacing="2">
+            <TextBlock Classes="caption" Text="{Binding DownloadEstimate}" TextWrapping="Wrap" FontWeight="SemiBold" />
+            <TextBlock Classes="caption" Text="{Binding DownloadTiles}" TextWrapping="Wrap" />
+            <TextBlock Classes="caption" TextWrapping="Wrap" Text="{l:T 'Actual size may be much larger or smaller, depending on the area and detail.'}" />
+          </StackPanel>
+        </StackPanel>
+        <TextBlock Classes="caption" Text="{Binding DownloadWarning}" TextWrapping="Wrap" Foreground="{DynamicResource App.Warning}"
+                   IsVisible="{Binding DownloadWarning, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
         <ProgressBar Value="{Binding DownloadProgress}" IsVisible="{Binding IsDownloading}" Height="6" />
-        <TextBlock Classes="caption" Text="{Binding DownloadText}" TextWrapping="Wrap" />
+        <TextBlock Classes="caption" Text="{Binding DownloadText}" TextWrapping="Wrap" IsVisible="{Binding DownloadText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+        <!-- A paused or interrupted download -->
+        <Border Classes="banner" IsVisible="{Binding HasPendingDownload}">
+          <StackPanel Spacing="6">
+            <TextBlock Text="{Binding PendingDownloadText}" TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button Content="{l:T 'Resume'}" Command="{Binding ResumeDownloadCommand}" />
+              <Button Content="{l:T 'Discard'}" Command="{Binding DiscardDownloadCommand}" />
+            </StackPanel>
+          </StackPanel>
+        </Border>
         <StackPanel Orientation="Horizontal" Spacing="8">
-          <Button Classes="accent" Content="{l:T 'Download area'}" Command="{Binding DownloadVisibleAreaCommand}" IsEnabled="{Binding !IsDownloading}" />
-          <Button Content="{l:T 'Cancel'}" Command="{Binding CancelDownloadCommand}" IsVisible="{Binding IsDownloading}" />
+          <Button Classes="accent" Content="{l:T 'Download area'}" Command="{Binding DownloadVisibleAreaCommand}" IsEnabled="{Binding CanDownload}"
+                  IsVisible="{Binding LayerAllowsDownload}" />
+          <Button Content="{l:T 'Pause'}" Command="{Binding CancelDownloadCommand}" IsVisible="{Binding IsDownloading}" />
         </StackPanel>
         <Grid ColumnDefinitions="*,Auto">
           <TextBlock Classes="tertiary" Text="{Binding CacheSize, StringFormat={l:T 'Stored on this PC: {0}'}}" VerticalAlignment="Center" />
           <Button Grid.Column="1" Classes="link" Content="{l:T 'Clear'}" Command="{Binding ClearTileCacheCommand}" />
         </Grid>
+        <TextBlock Classes="hint" TextWrapping="Wrap" Text="{l:T 'Includes the map tiles kept from browsing the map, so it is more than the areas you downloaded.'}" />
       </StackPanel>
     </Border>
 
-    <!-- Path banner -->
-    <Border Classes="card" Padding="12,8" Margin="14" HorizontalAlignment="Center" VerticalAlignment="Top" BoxShadow="0 4 14 0 #22000000"
-            IsVisible="{Binding HasPath}">
-      <StackPanel Orientation="Horizontal" Spacing="10">
-        <PathIcon Classes="small" Data="{StaticResource Icon.MapMarkerPath}" Foreground="#7C3AED" VerticalAlignment="Center" />
-        <TextBlock Text="{Binding PathSummary}" VerticalAlignment="Center" />
-        <Button Classes="link" Content="{l:T 'Clear'}" Command="{Binding ClearPathCommand}" />
-      </StackPanel>
-    </Border>
+    <!-- Path banner and the chips of the active advanced filters -->
+    <StackPanel Margin="330,14,90,14" HorizontalAlignment="Center" VerticalAlignment="Top" Spacing="8">
+      <Border Classes="card" Padding="12,8" HorizontalAlignment="Center" BoxShadow="0 4 14 0 #22000000" IsVisible="{Binding HasPath}">
+        <StackPanel Orientation="Horizontal" Spacing="10">
+          <PathIcon Classes="small" Data="{StaticResource Icon.MapMarkerPath}" Foreground="#7C3AED" VerticalAlignment="Center" />
+          <TextBlock Text="{Binding PathSummary}" VerticalAlignment="Center" />
+          <Button Classes="link" Content="{l:T 'Clear'}" Command="{Binding ClearPathCommand}" />
+        </StackPanel>
+      </Border>
+      <ItemsControl ItemsSource="{Binding FilterChips}" HorizontalAlignment="Center" IsVisible="{Binding HasFilterChips}">
+        <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel HorizontalAlignment="Center" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="vm:MapFilterChip">
+            <Border Classes="card" Padding="4,2" Margin="4,0,4,6" CornerRadius="16" BoxShadow="0 2 8 0 #26000000">
+              <StackPanel Orientation="Horizontal" Spacing="2">
+                <Button Classes="link" Command="{Binding $parent[UserControl].((vm:MapViewModel)DataContext).ShowAdvancedFiltersCommand}"
+                        ToolTip.Tip="{l:T 'Opens Advanced Filters'}" Padding="8,4">
+                  <StackPanel Orientation="Horizontal" Spacing="6">
+                    <PathIcon Classes="small" Data="{Binding IconKey, Converter={x:Static conv:IconConverter.Instance}}" />
+                    <TextBlock Text="{Binding Text}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                  </StackPanel>
+                </Button>
+                <Button Classes="icon" Command="{Binding $parent[UserControl].((vm:MapViewModel)DataContext).RemoveFilterCommand}" CommandParameter="{Binding}"
+                        ToolTip.Tip="{Binding RemoveTip}">
+                  <PathIcon Classes="tiny" Data="{StaticResource Icon.CloseCircle}" Foreground="{DynamicResource App.TextTertiary}" />
+                </Button>
+              </StackPanel>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+    </StackPanel>
 
     <!-- Selection card -->
     <Border Classes="card" Margin="14,14,14,52" Width="340" HorizontalAlignment="Left" VerticalAlignment="Bottom" BoxShadow="0 4 14 0 #22000000"

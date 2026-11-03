@@ -125,13 +125,15 @@ public sealed class TerrainProfile : Control
         };
         ctx.DrawGeometry(groundBrush, new Pen(new SolidColorBrush(Color.Parse("#4E7038")), 1.5), ground);
 
-        // obstructions
-        foreach (var t in terrain)
+        // obstructions: every sample between the two ends (as the analysis counts them), however close to an end
+        for (var i = 1; i < terrain.Count - 1; i++)
         {
+            var t = terrain[i];
             var fr = Fr(t.D);
             var clearance = Los(t.D) - t.H;
-            if (fr <= 0 || t.D <= 1 || length - t.D <= 1) continue;
+            if (!(fr > 0)) continue;
             var pct = clearance / fr * 100;
+            if (!double.IsFinite(pct)) continue;
             if (pct < RfCalculator.MarginalThreshold)
                 ctx.DrawEllipse(new SolidColorBrush(Color.Parse(pct < 0 ? "#E5484D" : "#F59E0B")), null, new Point(X(t.D), Y(t.H)), 3.5, 3.5);
         }

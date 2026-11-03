@@ -12,7 +12,11 @@
       <ItemsControl ItemsSource="{Binding Recent}">
         <ItemsControl.ItemTemplate>
           <DataTemplate x:DataType="vm:RecentConnectionRow">
-            <Grid ColumnDefinitions="*,Auto">
+            <Grid ColumnDefinitions="*,Auto,Auto">
+              <!-- The same radio's other link (firmware 1.18 radios with Bluetooth and WiFi) -->
+              <Button Grid.Column="1" Classes="link" Content="{Binding AlternateText}" IsVisible="{Binding HasAlternate}" ToolTip.Tip="{Binding AlternateTip}"
+                      Command="{Binding $parent[UserControl].((vm:ConnectViewModel)DataContext).ConnectAlternateCommand}" CommandParameter="{Binding}"
+                      IsEnabled="{Binding !$parent[UserControl].((vm:ConnectViewModel)DataContext).IsConnecting}" VerticalAlignment="Center" Margin="8,0" />
               <Button Classes="row" Command="{Binding $parent[UserControl].((vm:ConnectViewModel)DataContext).ConnectRecentCommand}" CommandParameter="{Binding}"
                       IsEnabled="{Binding !$parent[UserControl].((vm:ConnectViewModel)DataContext).IsConnecting}">
                 <StackPanel Orientation="Horizontal" Spacing="10">
@@ -23,7 +27,7 @@
                   </StackPanel>
                 </StackPanel>
               </Button>
-              <Button Grid.Column="1" Classes="icon" ToolTip.Tip="{l:T 'Remove'}" Command="{Binding $parent[UserControl].((vm:ConnectViewModel)DataContext).RemoveRecentCommand}" CommandParameter="{Binding}">
+              <Button Grid.Column="2" Classes="icon" ToolTip.Tip="{l:T 'Remove'}" Command="{Binding $parent[UserControl].((vm:ConnectViewModel)DataContext).RemoveRecentCommand}" CommandParameter="{Binding}">
                 <PathIcon Classes="small" Data="{StaticResource Icon.Close}" />
               </Button>
             </Grid>
@@ -114,6 +118,17 @@
         <Button Classes="link" Content="{l:T 'Cancel'}" Command="{Binding CancelConnectCommand}" />
       </StackPanel>
       <TextBlock Text="{Binding Error}" Classes="error" IsVisible="{Binding Error, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+      <!-- Pairing with the same radio failed again -->
+      <Border Classes="banner" IsVisible="{Binding ShowPairingHelp}">
+        <StackPanel Spacing="6">
+          <TextBlock Text="{l:T 'Pairing keeps failing'}" FontWeight="SemiBold" />
+          <TextBlock TextWrapping="Wrap" Text="{l:T 'The saved pairing with this radio stopped working. In Windows Settings ▸ Bluetooth &amp; devices, remove this radio, then connect again with the PIN shown on the radio. If this keeps happening, do a full erase and reflash the firmware at https://flasher.meshcore.io. Corrupted flash on the radio can cause this.'}" />
+          <StackPanel Orientation="Horizontal" Spacing="14">
+            <Button Classes="link" Content="{l:T 'Open Bluetooth settings'}" Command="{Binding OpenBluetoothSettingsCommand}" />
+            <Button Classes="link" Content="{l:T 'Open flasher.meshcore.io'}" Command="{Binding OpenFlasherCommand}" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
       <Button Content="{l:T 'Close'}" HorizontalAlignment="Right" Command="{Binding CancelCommand}" />
     </StackPanel>
   </Grid>

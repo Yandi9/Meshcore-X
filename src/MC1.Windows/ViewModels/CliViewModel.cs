@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MC1.Core.Models;
 using MC1.Core.Services;
+using MC1.Core.Utilities;
 using MeshCore;
 
 namespace MC1.Windows.ViewModels;
@@ -24,6 +25,8 @@ public sealed record CliLine(string Text, CliLineKind Kind)
 public sealed record CliTarget(string Name, ContactRecord? Contact)
 {
     public bool IsLocal => Contact is null;
+    /// <summary>A chat contact's companion radio (remote CLI, firmware 1.18).</summary>
+    public bool IsContactRadio => Contact is { TypeRaw: (int)ContactType.Chat };
     public override string ToString() => Name;
 }
 
@@ -33,6 +36,8 @@ public sealed partial class CliViewModel : ToolPage
     private readonly List<string> _history = new();
     private int _historyIndex = -1;
     private string? _pendingConfirm;
+    private List<string> _matches = [];
+    private bool _contactRadioTargets;
 
     private static readonly string[] RemoteCommands =
     [
@@ -48,10 +53,13 @@ public sealed partial class CliViewModel : ToolPage
 
     private static readonly string[] LocalCommands =
     [
-        "help", "clear", "ver", "board", "clock", "clock sync", "advert", "floodadv", "reboot", "stats",
+        "help", "clear", "ver", "board", "clock", "clock sync", "advert", "advert.zerohop", "floodadv", "reboot", "stats",
         "get name", "get lat", "get lon", "get tx", "get radio", "get freq", "get public.key", "get multi.acks", "get path.hash.mode", "get bat", "get vars",
         "set name ", "set lat ", "set lon ", "set tx ", "set radio ", "set freq ", "set multi.acks ", "set path.hash.mode ", "set var ",
     ];
+
+    /// <summary>App commands for every target (switching targets by number or name).</summary>
+    private static readonly string[] SessionCommands = ["session", "session list", "session local"];
 
     public CliViewModel(MainWindowViewModel main)
     {
@@ -64,6 +72,8 @@ public sealed partial class CliViewModel : ToolPage
         });
         Core.Remote.CliOutput += onOutput;
         Track(() => Core.Remote.CliOutput -= onOutput);
+        // Contact radios become targets once a 1.18 radio is connected (and leave when it isn't).
+        OnStatus(() => Ui(() => { if (_contactRadioTargets != Core.Device.SupportsRadioCli && Targets.Count > 0) ReloadTargets(); }));
         Lines.Add(new CliLine(L.T("MeshCore CLI — type 'help' for local commands. Pick a remote node above to administer it."), CliLineKind.Info));
     }
 
@@ -86,10 +96,15 @@ public sealed partial class CliViewModel : ToolPage
     private void ReloadTargets()
     {
         var selected = Target?.Contact?.Id;
+        _contactRadioTargets = Core.Device.SupportsRadioCli;
         Targets.Clear();
         Targets.Add(new CliTarget(L.T("This radio (local)"), null));
         foreach (var c in Core.Contacts.GetAll().Where(c => c.ContactType is ContactType.Repeater or ContactType.Room or ContactType.Sensor).OrderBy(c => c.DisplayName))
             Targets.Add(new CliTarget($"{c.DisplayName} · {Formatters.TypeName(c.ContactType)}", c));
+        // Firmware 1.18: a contact's own radio runs CLI commands when its owner allowed this radio Remote CLI.
+        if (_contactRadioTargets)
+            foreach (var c in Core.Contacts.GetAll().Where(c => c.TypeRaw == (int)ContactType.Chat && !c.IsBlocked).OrderBy(c => c.DisplayName))
+                Targets.Add(new CliTarget(L.F("{0} · contact's radio", c.DisplayName), c));
         Target = Targets.FirstOrDefault(t => t.Contact?.Id == selected) ?? Targets[0];
     }
 
@@ -106,8 +121,18 @@ public sealed partial class CliViewModel : ToolPage
         if (value.IsLocal)
         {
             Prompt = $"{(Core.SelfName is { Length: > 0 } n ? n : "radio")}>";
-            SessionStatus = L.T("Commands run on your companion radio.");
+            SessionStatus = Core.Device.SupportsRadioCli
+                ? L.T("Commands run on your companion radio. Commands the app doesn't know go to the radio itself.")
+                : L.T("Commands run on your companion radio.");
             NeedsLogin = false;
+        }
+        else if (value.IsContactRadio)
+        {
+            var c = value.Contact!;
+            Prompt = $"{c.DisplayName}>";
+            NeedsLogin = false;
+            SessionStatus = L.F("Commands go to {0}'s radio. Without Remote CLI access you get no reply, and they receive each command as a message.", c.DisplayName);
+            Append($"── {c.DisplayName} ──", CliLineKind.Info);
         }
         else
         {
@@ -128,22 +153,40 @@ public sealed partial class CliViewModel : ToolPage
 
     partial void OnInputChanged(string value) => UpdateSuggestions();
 
+    /// <summary>The completion lines for the selected target. Lines end with a space only while they need an argument.</summary>
+    private IEnumerable<string> CompletionSource()
+    {
+        if (Target?.IsContactRadio == true) return RadioCliCompletion.ContactRadioLines().Concat(SessionCommands);
+        if (Target?.IsLocal != false)
+        {
+            IEnumerable<string> local = LocalCommands.Concat(SessionCommands);
+            return Core.Device.SupportsRadioCli ? local.Concat(RadioCliCompletion.LocalRadioLines()) : local;
+        }
+        // A room never offers repeat mode.
+        IEnumerable<string> remote = RemoteCommands;
+        if (Target.Contact?.ContactType == ContactType.Room) remote = remote.Where(s => !s.Contains(" repeat", StringComparison.Ordinal));
+        return remote.Concat(SessionCommands);
+    }
+
     private void UpdateSuggestions()
     {
         Suggestions.Clear();
+        _matches = [];
         var q = Input.TrimStart();
         if (q.Length == 0) return;
-        var source = Target?.IsLocal != false ? LocalCommands : RemoteCommands;
-        foreach (var s in source.Where(s => s.StartsWith(q, StringComparison.OrdinalIgnoreCase) && !s.Equals(q, StringComparison.OrdinalIgnoreCase)).Take(8)) Suggestions.Add(s);
+        _matches = CompletionSource().Distinct()
+            .Where(s => s.StartsWith(q, StringComparison.OrdinalIgnoreCase) && !s.Equals(q, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        foreach (var s in _matches.Take(8)) Suggestions.Add(s);
     }
 
-    /// <summary>Tab completion: completes to the longest common prefix of the matches.</summary>
+    /// <summary>Tab completion: completes to the longest common prefix of all matches.</summary>
     public void Complete()
     {
-        if (Suggestions.Count == 0) return;
-        if (Suggestions.Count == 1) { Input = Suggestions[0]; return; }
-        var prefix = Suggestions[0];
-        foreach (var s in Suggestions.Skip(1))
+        if (_matches.Count == 0) return;
+        if (_matches.Count == 1) { Input = _matches[0]; return; }
+        var prefix = _matches[0];
+        foreach (var s in _matches.Skip(1))
         {
             var i = 0;
             while (i < prefix.Length && i < s.Length && char.ToLowerInvariant(prefix[i]) == char.ToLowerInvariant(s[i])) i++;
@@ -188,18 +231,34 @@ public sealed partial class CliViewModel : ToolPage
         OnTargetChanged(Target);
     }
 
+    /// <summary>
+    /// What is sent and recorded: the radio CLI gets the line as typed (a value's spaces, e.g. an empty WiFi password,
+    /// matter); app commands and repeater commands get the trimmed line.
+    /// </summary>
+    private string TransmittedLine(string original, string normalized)
+    {
+        if (Target?.IsContactRadio == true)
+        {
+            var parts = normalized.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+            var verb = parts[0].ToLowerInvariant();
+            return verb == "help" || (verb == "clear" && parts.Length == 1) ? normalized : original.TrimEnd('\r', '\n');
+        }
+        if (Target?.IsLocal != false && Core.Device.SupportsRadioCli && RadioCliPassthrough.ShouldSend(normalized)) return original.TrimEnd('\r', '\n');
+        return normalized;
+    }
+
     [RelayCommand]
     private async Task Submit()
     {
-        var command = Input.Trim();
+        var original = Input;
+        var command = original.Trim();
         Input = "";
         _historyIndex = -1;
         if (command.Length == 0) return;
-        if (_history.Count == 0 || _history[^1] != command) _history.Add(command);
-        Append($"{Prompt} {command}", CliLineKind.Input);
 
         if (_pendingConfirm is not null)
         {
+            Append($"{Prompt} {command}", CliLineKind.Input);
             var confirmed = command.Equals("y", StringComparison.OrdinalIgnoreCase) || command.Equals("yes", StringComparison.OrdinalIgnoreCase);
             var pending = _pendingConfirm;
             _pendingConfirm = null;
@@ -207,8 +266,60 @@ public sealed partial class CliViewModel : ToolPage
             await Execute(pending, confirmed: true);
             return;
         }
+        var transmitted = TransmittedLine(original, command);
+        if (_history.Count == 0 || _history[^1] != transmitted) _history.Add(transmitted);
+        Append($"{Prompt} {transmitted}", CliLineKind.Input);
         if (command.Equals("clear", StringComparison.OrdinalIgnoreCase)) { Lines.Clear(); return; }
-        await Execute(command, confirmed: false);
+        if (TryHandleSession(command)) return;
+        await Execute(transmitted, confirmed: false);
+    }
+
+    // MARK: Sessions ("session", "session <n|name|local>", "s<n>")
+
+    /// <summary>Switches targets by number (1 = this radio, then the list above) or name. Like the iPhone app, a
+    /// number that isn't a session (0, negative, past the end) is rejected.</summary>
+    private bool TryHandleSession(string command)
+    {
+        var parts = command.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        var verb = parts[0].ToLowerInvariant();
+        if (verb.Length > 1 && verb[0] == 's' && int.TryParse(verb[1..], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out _))
+        {
+            SwitchSession(verb[1..]);
+            return true;
+        }
+        if (verb != "session") return false;
+        var arg = parts.Length > 1 ? parts[1].Trim() : "";
+        if (arg.Length == 0 || arg.Equals("list", StringComparison.OrdinalIgnoreCase)) ListSessions();
+        else if (arg.Equals("local", StringComparison.OrdinalIgnoreCase)) SwitchSession("1");
+        else SwitchSession(arg);
+        return true;
+    }
+
+    private void ListSessions()
+    {
+        if (Targets.Count == 0) ReloadTargets();
+        Append(L.T("Sessions:"), CliLineKind.Output);
+        for (var i = 0; i < Targets.Count; i++)
+        {
+            var t = Targets[i];
+            var name = t.IsLocal ? L.F("{0} (local)", Core.SelfName is { Length: > 0 } n ? n : "radio") : t.Name;
+            Append($"  {(t == Target ? '*' : ' ')} {i + 1}. {name}", CliLineKind.Output);
+        }
+    }
+
+    private void SwitchSession(string arg)
+    {
+        if (Targets.Count == 0) ReloadTargets();
+        CliTarget? found = null;
+        if (int.TryParse(arg, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var number))
+        {
+            if (number >= 1 && number <= Targets.Count) found = Targets[number - 1];
+        }
+        else
+            found = Targets.FirstOrDefault(t => t.Contact is { } c && (c.DisplayName.Equals(arg, StringComparison.CurrentCultureIgnoreCase) || c.Name.Equals(arg, StringComparison.CurrentCultureIgnoreCase)));
+        if (found is null) { Append(L.F("Session not found: {0}", arg), CliLineKind.Error); return; }
+        Append(L.F("Switched to {0}", found.IsLocal ? (Core.SelfName is { Length: > 0 } n ? n : "radio") : found.Contact!.DisplayName), CliLineKind.Info);
+        Target = found;
     }
 
     private async Task Execute(string command, bool confirmed)
@@ -217,17 +328,21 @@ public sealed partial class CliViewModel : ToolPage
         IsBusy = true;
         try
         {
-            if (Target?.Contact is { } contact) await ExecuteRemote(contact, command, confirmed);
+            if (Target?.Contact is { } contact) await ExecuteRemote(contact, command, confirmed, Target.IsContactRadio);
             else await ExecuteLocal(command, confirmed);
         }
         catch (Exception ex) { Append(L.F("Error: {0}", ex.Message), CliLineKind.Error); }
         finally { IsBusy = false; }
     }
 
-    private async Task ExecuteRemote(ContactRecord contact, string command, bool confirmed)
+    private static string NoReplySentLine(RemoteCliNoReplyKind kind) =>
+        kind == RemoteCliNoReplyKind.Reboot ? L.T("Reboot command sent.") : L.T("Power off command sent.");
+
+    private async Task ExecuteRemote(ContactRecord contact, string command, bool confirmed, bool contactRadio)
     {
-        var lower = command.ToLowerInvariant();
-        if (!confirmed && (lower == "reboot" || lower.StartsWith("set radio") || lower.StartsWith("set freq") || lower == "erase"))
+        var lower = command.Trim().ToLowerInvariant();
+        if (!confirmed && (lower == "reboot" || lower.StartsWith("set radio") || lower.StartsWith("set freq") || lower == "erase"
+                           || (contactRadio && lower is "poweroff" or "shutdown")))
         {
             _pendingConfirm = command;
             // The answer is still checked against 'y' / 'yes' (see Submit).
@@ -237,10 +352,33 @@ public sealed partial class CliViewModel : ToolPage
         _awaiting = true;
         try
         {
+            if (contactRadio)
+            {
+                await ExecuteOnContactRadio(contact, command);
+                return;
+            }
             var reply = await Core.Remote.SendCliAsync(contact, command, TimeSpan.FromSeconds(12));
             Append(reply.Length == 0 ? L.T("(empty reply)") : reply, CliLineKind.Output);
         }
         finally { _awaiting = false; }
+    }
+
+    /// <summary>Remote CLI on a contact's radio: reboot and power off often get no reply (a real reply is still shown);
+    /// no reply to anything else most likely means no access.</summary>
+    private async Task ExecuteOnContactRadio(ContactRecord contact, string command)
+    {
+        var noReply = RemoteCliNoReply.ForContactRadio(command);
+        try
+        {
+            var reply = await Core.Remote.SendRadioCliAsync(contact, command, noReply is null ? null : RemoteNodeService.RadioCliNoReplyTimeout);
+            if (reply.Length == 0 && noReply is { } k) Append(NoReplySentLine(k), CliLineKind.Info);
+            else Append(reply.Length == 0 ? L.T("(empty reply)") : reply, CliLineKind.Output);
+        }
+        catch (TimeoutException)
+        {
+            if (noReply is { } k) Append(NoReplySentLine(k), CliLineKind.Info);
+            else Append(L.F("No reply from {0}. They may not have allowed you Remote CLI access, or their node was unreachable.", contact.DisplayName), CliLineKind.Error);
+        }
     }
 
     private static bool TryDouble(string s, out double v) => double.TryParse(s.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out v);
@@ -248,22 +386,32 @@ public sealed partial class CliViewModel : ToolPage
     private async Task ExecuteLocal(string command, bool confirmed)
     {
         var session = Core.Session ?? throw new InvalidOperationException(L.T("Not connected."));
-        var parts = command.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+        // Firmware 1.18: anything the app doesn't handle itself runs on the radio's own CLI, exactly as typed.
+        if (Core.Device.SupportsRadioCli && RadioCliPassthrough.ShouldSend(command))
+        {
+            var reply = await Core.Device.RunRadioCliAsync(command);
+            Append(reply.Length == 0 ? L.T("(empty reply)") : reply, CliLineKind.Output);
+            return;
+        }
+        var parts = command.Trim().Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
         var verb = parts[0].ToLowerInvariant();
         var self = Core.SelfInfo;
         var caps = Core.Capabilities;
         switch (verb)
         {
             case "help":
-                // The command syntax lines are what the user types, so only the two sentences are translated.
+                // The command syntax lines are what the user types, so only the sentences are translated.
                 Append(L.T("Local commands (this radio):") + "\n" + """
                       ver | board | clock | clock sync | advert | floodadv | reboot | stats
                       get name|lat|lon|tx|radio|freq|public.key|multi.acks|path.hash.mode|bat|vars
                       set name <text> | set lat <deg> | set lon <deg> | set tx <dBm>
                       set radio <freqMHz>,<bwKHz>,<sf>,<cr> | set freq <MHz>
                       set multi.acks <0|1> | set path.hash.mode <0|1|2> | set var <key> <value>
-                      clear
-                    """ + "\n" + L.T("Pick a repeater or room above to send its firmware CLI commands."), CliLineKind.Info);
+                      session [list|local|<n>|<name>] | s<n> | clear
+                    """ + (Core.Device.SupportsRadioCli
+                        ? "\n  poweroff\n" + L.T("Other commands (for example get af, set wifi.ssid <name>, get wifi.status) go to the radio's own CLI.")
+                        : "")
+                    + "\n" + L.T("Pick a repeater or room above to send its firmware CLI commands."), CliLineKind.Info);
                 return;
             case "ver":
                 Append(caps is null ? "unknown" : $"{caps.Version} (build {caps.FirmwareBuild}, protocol v{caps.FirmwareVersion})", CliLineKind.Output);
@@ -279,7 +427,7 @@ public sealed partial class CliViewModel : ToolPage
                 var t = await session.GetTimeAsync();
                 Append($"{t.LocalDateTime:HH:mm:ss - dd/MM/yyyy} (offset {(t - DateTimeOffset.UtcNow).TotalSeconds:+0;-0}s from this PC)", CliLineKind.Output);
                 return;
-            case "advert":
+            case "advert" or "advert.zerohop":
                 await Core.Device.SendAdvertAsync(false);
                 Append("OK - zero-hop advert sent", CliLineKind.Output);
                 return;
@@ -291,6 +439,12 @@ public sealed partial class CliViewModel : ToolPage
                 if (!confirmed) { _pendingConfirm = command; Append(L.T("Reboot the radio? The connection will drop. Type 'y' to confirm."), CliLineKind.Info); return; }
                 await Core.Device.RebootAsync();
                 Append("Rebooting…", CliLineKind.Output);
+                return;
+            // The radio powers off without a reply, so the app sends it (and doesn't reconnect afterwards).
+            case "poweroff" or "shutdown" when Core.Device.SupportsRadioCli:
+                if (!confirmed) { _pendingConfirm = command; Append(L.T("Power off the radio? It turns off and disconnects; turn it on with its power button. Type 'y' to confirm."), CliLineKind.Info); return; }
+                await Core.Device.PowerOffAsync();
+                Append("OK - powering off", CliLineKind.Output);
                 return;
             case "stats":
                 var (core, radio, packets) = await Core.Device.GetStatsAsync();

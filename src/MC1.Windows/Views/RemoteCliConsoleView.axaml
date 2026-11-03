@@ -1,0 +1,47 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:l="using:MC1.Windows.Localization"
+             xmlns:vm="using:MC1.Windows.ViewModels"
+             xmlns:conv="using:MC1.Windows.Converters"
+             x:Class="MC1.Windows.Views.RemoteCliConsoleView"
+             x:DataType="vm:RemoteCliConsoleViewModel">
+  <!-- Remote commands for a contact's radio (remote CLI, firmware 1.18). -->
+  <Grid RowDefinitions="*,Auto" Margin="18,16,18,14">
+    <Border Background="{DynamicResource App.CodeBackground}" CornerRadius="10" Padding="12,10">
+      <ScrollViewer x:Name="OutputScroll">
+        <ItemsControl ItemsSource="{Binding Lines}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:CliLine">
+              <SelectableTextBlock Text="{Binding Text}" Classes="mono" FontSize="13" TextWrapping="Wrap"
+                                   Foreground="{Binding Color, Converter={x:Static conv:HexBrushConverter.Instance}}" />
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </ScrollViewer>
+    </Border>
+    <StackPanel Grid.Row="1" Spacing="6" Margin="0,8,0,0">
+      <ItemsControl ItemsSource="{Binding Suggestions}">
+        <ItemsControl.ItemsPanel>
+          <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+        </ItemsControl.ItemsPanel>
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="x:String">
+            <Button Classes="reaction" Content="{Binding}" Margin="0,0,4,4" FontFamily="{StaticResource App.MonoFont}"
+                    Command="{Binding $parent[UserControl].((vm:RemoteCliConsoleViewModel)DataContext).UseSuggestionCommand}" CommandParameter="{Binding}" />
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+      <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+        <TextBlock Text="{Binding Prompt}" Classes="mono" VerticalAlignment="Center" Margin="0,0,8,0" FontWeight="SemiBold" />
+        <TextBox x:Name="InputBox" Grid.Column="1" Text="{Binding Input}" Classes="mono" Watermark="{l:T 'Type a command (help)'}" />
+        <Button Grid.Column="2" Classes="accent" Margin="8,0,0,0" Command="{Binding SubmitCommand}" IsEnabled="{Binding !IsBusy}">
+          <Panel>
+            <TextBlock Text="{l:T 'Run'}" Foreground="White" IsVisible="{Binding !IsBusy}" />
+            <TextBlock Text="…" Foreground="White" IsVisible="{Binding IsBusy}" />
+          </Panel>
+        </Button>
+        <Button Grid.Column="3" Margin="6,0,0,0" Content="{l:T 'Cancel'}" Command="{Binding CancelWaitingCommand}" IsVisible="{Binding IsBusy}" />
+      </Grid>
+    </StackPanel>
+  </Grid>
+</UserControl>

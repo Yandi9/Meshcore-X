@@ -15,6 +15,13 @@
         <DataTemplate><TextBlock Text="{Binding Converter={x:Static conv:EnumDisplayConverter.Instance}}" /></DataTemplate>
       </ComboBox.ItemTemplate>
     </ComboBox>
+    <CheckBox IsChecked="{Binding IsPinned}" Margin="0,4,0,0" ToolTip.Tip="{l:T 'Pinned chats are listed first, on this PC.'}">
+      <StackPanel Orientation="Horizontal" Spacing="6">
+        <PathIcon Classes="small" Data="{StaticResource Icon.PinOutline}" />
+        <TextBlock Text="{l:T 'Pin'}" />
+      </StackPanel>
+    </CheckBox>
+    <TextBlock Text="{Binding Message}" Classes="secondary" TextWrapping="Wrap" IsVisible="{Binding Message, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
     <TextBlock Classes="section" Text="{l:T 'ACCOUNT'}" />
     <WrapPanel>
       <Button Content="{l:T 'Manage room server…'}" Command="{Binding ManageCommand}" IsVisible="{Binding IsAdmin}" Margin="0,0,8,8" />

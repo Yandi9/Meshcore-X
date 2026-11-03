@@ -1,0 +1,93 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:l="using:MC1.Windows.Localization"
+             xmlns:vm="using:MC1.Windows.ViewModels"
+             x:Class="MC1.Windows.Views.RadioDeviceSectionsView"
+             x:DataType="vm:RadioDeviceSectionsViewModel">
+  <!-- Radio page sections for firmware 1.18: links, radio WiFi, remote CLI grants, power off. -->
+  <StackPanel Spacing="4">
+    <!-- Connection: Bluetooth / WiFi of this radio -->
+    <StackPanel IsVisible="{Binding Links.HasRows}">
+      <TextBlock Classes="section" Text="{l:T 'CONNECTION'}" />
+      <Border Classes="group">
+        <ContentControl Content="{Binding Links}" />
+      </Border>
+    </StackPanel>
+
+    <!-- Radio WiFi -->
+    <StackPanel IsVisible="{Binding ShowWifi}">
+      <TextBlock Classes="section" Text="{l:T 'RADIO WIFI'}" />
+      <Border Classes="group">
+        <StackPanel>
+          <Grid ColumnDefinitions="*,Auto" Classes="setting">
+            <StackPanel VerticalAlignment="Center">
+              <TextBlock Text="{l:T 'WiFi'}" />
+              <TextBlock Classes="hint" Text="{l:T 'The radio joins this network after a reboot.'}" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+              <ProgressBar IsIndeterminate="True" Width="40" MinWidth="40" IsVisible="{Binding WifiBusy}" VerticalAlignment="Center" />
+              <ToggleSwitch IsChecked="{Binding WifiEnabled}" IsEnabled="{Binding CanRunWifi}" OnContent="" OffContent="" />
+            </StackPanel>
+          </Grid>
+          <Grid ColumnDefinitions="200,*,Auto" Classes="setting">
+            <TextBlock Classes="label" Text="{l:T 'Network'}" />
+            <TextBlock Grid.Column="1" Text="{Binding NetworkName}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+            <Button Grid.Column="2" Content="{l:T 'Edit…'}" Command="{Binding EditNetworkCommand}" IsEnabled="{Binding CanRunWifi}" VerticalAlignment="Center" />
+          </Grid>
+          <Grid ColumnDefinitions="200,*" Classes="setting">
+            <TextBlock Classes="label" Text="{l:T 'Status'}" />
+            <TextBlock Grid.Column="1" Text="{Binding WifiStatus}" VerticalAlignment="Center" />
+          </Grid>
+          <Grid ColumnDefinitions="200,*" Classes="setting" IsVisible="{Binding IpAddress, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+            <TextBlock Classes="label" Text="{l:T 'IP address'}" />
+            <SelectableTextBlock Grid.Column="1" Text="{Binding IpAddress}" Classes="mono" VerticalAlignment="Center" />
+          </Grid>
+          <Border Classes="banner" Margin="0,4,0,8" IsVisible="{Binding RebootPending}">
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Text="{l:T 'WiFi changes apply after the radio reboots.'}" TextWrapping="Wrap" VerticalAlignment="Center" />
+              <Button Grid.Column="1" Content="{l:T 'Reboot to apply…'}" Command="{Binding RebootToApplyCommand}" IsEnabled="{Binding CanRunWifi}" Margin="10,0,0,0" />
+            </Grid>
+          </Border>
+          <TextBlock Classes="error" Text="{Binding WifiError}" Margin="0,0,0,6"
+                     IsVisible="{Binding WifiError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+          <Button Classes="link danger" Content="{l:T 'Clear WiFi settings…'}" Command="{Binding ClearWifiCommand}" IsEnabled="{Binding CanClearWifi}"
+                  HorizontalAlignment="Left" Margin="0,4,0,12" />
+        </StackPanel>
+      </Border>
+    </StackPanel>
+
+    <!-- Remote CLI: contacts allowed to run CLI commands on this radio -->
+    <StackPanel IsVisible="{Binding SupportsRadioCli}">
+      <TextBlock Classes="section" Text="{l:T 'REMOTE CLI'}" />
+      <Border Classes="group">
+        <Grid ColumnDefinitions="*,Auto" Classes="setting">
+          <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+            <TextBlock Text="{Binding RemoteCliSummary}" />
+            <TextBlock Classes="hint" Text="{l:T 'Allowed contacts can control this radio over the mesh. The app will not alert you when they do.'}" />
+          </StackPanel>
+          <Button Grid.Column="1" Content="{l:T 'Allowed contacts…'}" Command="{Binding ManageRemoteCliCommand}" IsEnabled="{Binding IsReady}" VerticalAlignment="Center" />
+        </Grid>
+      </Border>
+    </StackPanel>
+
+    <!-- Power off -->
+    <StackPanel IsVisible="{Binding SupportsRadioCli}">
+      <TextBlock Classes="section" Text="{l:T 'POWER'}" />
+      <Border Classes="group">
+        <Grid ColumnDefinitions="*,Auto" Classes="setting">
+          <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+            <TextBlock Text="{l:T 'Power off the radio'}" />
+            <TextBlock Classes="hint" Text="{l:T 'The radio turns off and disconnects. The app won\'t reconnect until you connect again.'}" />
+          </StackPanel>
+          <Button Grid.Column="1" Classes="danger" Command="{Binding PowerOffCommand}" IsEnabled="{Binding CanPowerOff}" VerticalAlignment="Center">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <PathIcon Classes="small" Data="{StaticResource Icon.Power}" IsVisible="{Binding !PoweringOff}" />
+              <ProgressBar IsIndeterminate="True" Width="14" MinWidth="14" IsVisible="{Binding PoweringOff}" VerticalAlignment="Center" />
+              <TextBlock Text="{l:T 'Power off…'}" />
+            </StackPanel>
+          </Button>
+        </Grid>
+      </Border>
+    </StackPanel>
+  </StackPanel>
+</UserControl>

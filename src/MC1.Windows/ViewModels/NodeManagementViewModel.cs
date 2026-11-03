@@ -14,12 +14,64 @@ namespace MC1.Windows.ViewModels;
 public sealed record NeighbourRow(string Name, string KeyText, string HeardText, double Snr, string SnrText, string Color);
 public sealed record AclRow(string Name, string KeyText, string Permission);
 
-/// <summary>Remote administration of a repeater, room server or sensor.</summary>
-public sealed partial class NodeManagementViewModel : ViewModelBase
+/// <summary>
+/// The "Manage node" dialog for a repeater, room server or sensor. The dialog is only a window onto the node's
+/// <see cref="RemoteAdminWorkspace"/>: closing it doesn't stop a status, telemetry or neighbours request (or reading
+/// the settings), and opening the node again shows what came back.
+/// </summary>
+public sealed class NodeManagementViewModel : ViewModelBase
 {
+    public NodeManagementViewModel(ContactRecord contact)
+    {
+        Admin = RemoteAdminWorkspace.For(contact);
+        Admin.Reattach();
+    }
+
+    public RemoteAdminWorkspace Admin { get; }
+
+    /// <summary>Closes the dialog (set by the dialog service).</summary>
+    public Action? Close
+    {
+        get => Admin.Close;
+        set => Admin.Close = value;
+    }
+
+    /// <summary>The dialog closed: the requests keep going, but nobody is watching the periodic refresh any more.</summary>
+    public void Detached()
+    {
+        Admin.AutoRefresh = false;
+        Admin.Close = null;
+    }
+}
+
+/// <summary>
+/// Remote administration of one repeater, room server or sensor, kept per radio and node while the app runs (like the
+/// iPhone's RemoteAdminWorkspaces), so jobs keep running when the user leaves the dialog.
+/// </summary>
+public sealed partial class RemoteAdminWorkspace : ViewModelBase
+{
+    private static readonly Dictionary<string, RemoteAdminWorkspace> s_workspaces = new();
+
+    /// <summary>The workspace for this node on the connected radio (created on first use).</summary>
+    public static RemoteAdminWorkspace For(ContactRecord contact)
+    {
+        if (Core.RadioId is not { } radioId) return new RemoteAdminWorkspace(contact, null);
+        var key = radioId + "|" + Convert.ToHexString(contact.PublicKey);
+        lock (s_workspaces)
+        {
+            if (s_workspaces.TryGetValue(key, out var existing)) return existing;
+            var created = new RemoteAdminWorkspace(contact, key);
+            s_workspaces[key] = created;
+            return created;
+        }
+    }
+
+    /// <summary>Whether a workspace for this node is kept (for tests and diagnostics).</summary>
+    internal static int Count { get { lock (s_workspaces) return s_workspaces.Count; } }
+
     private ContactRecord _contact;
 
-    public NodeManagementViewModel(ContactRecord contact)
+    private RemoteAdminWorkspace(ContactRecord contact, string? key)
     {
         _contact = contact;
         Title = contact.DisplayName;
@@ -34,7 +86,20 @@ public sealed partial class NodeManagementViewModel : ViewModelBase
         LoadHistory();
         Action<string, bool> onSession = (_, _) => Ui(RefreshSession);
         Core.Remote.SessionStateChanged += onSession;
-        Track(() => Core.Remote.SessionStateChanged -= onSession);
+        // Rebuilding the UI (a language change) retires the workspaces with the other view-models.
+        Track(() =>
+        {
+            Core.Remote.SessionStateChanged -= onSession;
+            _autoCts?.Cancel();
+            if (key is not null) lock (s_workspaces) s_workspaces.Remove(key);
+        });
+    }
+
+    /// <summary>The dialog was opened (again): show the node's current name, route, sign-in and history.</summary>
+    public void Reattach()
+    {
+        RefreshSession();
+        LoadHistory();
     }
 
     public string Title { get; }
@@ -73,7 +138,7 @@ public sealed partial class NodeManagementViewModel : ViewModelBase
     [ObservableProperty] private int _revision;
 
     // Settings (read via CLI)
-    [ObservableProperty] private bool _settingsLoaded;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(HiddenFromDiscovery))] private bool _settingsLoaded;
     [ObservableProperty] private string? _settingsProgress;
     [ObservableProperty] private string _setName = "";
     [ObservableProperty] private string _setFrequency = "";
@@ -82,8 +147,8 @@ public sealed partial class NodeManagementViewModel : ViewModelBase
     [ObservableProperty] private string _setCr = "";
     [ObservableProperty] private string _setTx = "";
     [ObservableProperty] private bool _setRepeat;
-    [ObservableProperty] private string _setAdvertInterval = "";
-    [ObservableProperty] private string _setFloodAdvertInterval = "";
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(HiddenFromDiscovery))] private string _setAdvertInterval = "";
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(HiddenFromDiscovery))] private string _setFloodAdvertInterval = "";
     [ObservableProperty] private string _setFloodMax = "";
     [ObservableProperty] private string _setLat = "";
     [ObservableProperty] private string _setLon = "";
@@ -94,6 +159,9 @@ public sealed partial class NodeManagementViewModel : ViewModelBase
     [ObservableProperty] private string _nodeVersion = "";
 
     private CancellationTokenSource? _autoCts;
+
+    /// <summary>A repeater with both advert intervals at 0 doesn't answer Node Discovery (explained under the intervals).</summary>
+    public bool HiddenFromDiscovery => IsRepeater && SettingsLoaded && SetAdvertInterval.Trim() == "0" && SetFloodAdvertInterval.Trim() == "0";
 
     partial void OnHistoryWindowChanged(int value) => LoadHistory();
 
@@ -239,13 +307,15 @@ public sealed partial class NodeManagementViewModel : ViewModelBase
     {
         var window = HistoryWindow switch { 1 => TimeSpan.FromDays(7), 2 => TimeSpan.FromDays(30), _ => TimeSpan.FromHours(24) };
         var snaps = Core.Remote.History(_contact, window);
+        // Captures with impossible signal values (garbled replies) stay stored but aren't charted.
+        var chartable = RadioHistoryFilter.Chartable(snaps);
         BatterySeries.Clear();
         NoiseSeries.Clear();
         SnrSeries.Clear();
-        var battery = snaps.Where(s => s.BatteryMv is > 0).Select(s => new ChartPoint(s.CapturedAt, s.BatteryMv!.Value / 1000.0)).ToList();
-        var noise = snaps.Where(s => s.NoiseFloor is not null && s.NoiseFloor != 0).Select(s => new ChartPoint(s.CapturedAt, s.NoiseFloor!.Value)).ToList();
-        var rssi = snaps.Where(s => s.LastRssi is not null && s.LastRssi != 0).Select(s => new ChartPoint(s.CapturedAt, s.LastRssi!.Value)).ToList();
-        var snr = snaps.Where(s => s.LastSnr is not null).Select(s => new ChartPoint(s.CapturedAt, s.LastSnr!.Value)).ToList();
+        var battery = chartable.Where(s => s.BatteryMv is > 0).Select(s => new ChartPoint(s.CapturedAt, s.BatteryMv!.Value / 1000.0)).ToList();
+        var noise = chartable.Where(s => s.NoiseFloor is not null && s.NoiseFloor != 0).Select(s => new ChartPoint(s.CapturedAt, s.NoiseFloor!.Value)).ToList();
+        var rssi = chartable.Where(s => s.LastRssi is not null && s.LastRssi != 0).Select(s => new ChartPoint(s.CapturedAt, s.LastRssi!.Value)).ToList();
+        var snr = chartable.Where(s => s.LastSnr is not null).Select(s => new ChartPoint(s.CapturedAt, s.LastSnr!.Value)).ToList();
         if (battery.Count > 0) BatterySeries.Add(new ChartSeries { Name = L.T("Battery"), Color = "#22A06B", Points = battery, Fill = true, ShowDots = battery.Count < 40 });
         if (noise.Count > 0) NoiseSeries.Add(new ChartSeries { Name = L.T("Noise floor"), Color = "#E5484D", Points = noise, ShowDots = noise.Count < 40 });
         if (rssi.Count > 0) NoiseSeries.Add(new ChartSeries { Name = L.T("Last RSSI"), Color = "#2463EB", Points = rssi, ShowDots = rssi.Count < 40 });

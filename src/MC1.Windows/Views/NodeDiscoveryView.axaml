@@ -32,6 +32,7 @@
           </StackPanel>
           <ProgressBar Value="{Binding Progress}" IsVisible="{Binding IsScanning}" Height="4" />
           <TextBlock Text="{Binding Status}" TextWrapping="Wrap" Classes="secondary" />
+          <TextBlock Text="{Binding HiddenRepeatersNote}" TextWrapping="Wrap" Classes="caption" IsVisible="{Binding ShowHiddenRepeatersNote}" />
         </StackPanel>
       </Border>
       <ItemsControl ItemsSource="{Binding Results}">

@@ -47,6 +47,13 @@
             <TextBlock Text="{l:T 'Telemetry'}" />
           </StackPanel>
         </Button>
+        <!-- Firmware 1.18: CLI commands to this contact's own radio (it answers only if its owner allowed this radio). -->
+        <Button Margin="0,0,8,8" Command="{Binding RemoteCommandsCommand}" IsVisible="{Binding ShowsRemoteCli}" IsEnabled="{Binding CanRemoteCli}">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <PathIcon Classes="small" Data="{StaticResource Icon.Console}" />
+            <TextBlock Text="{l:T 'Remote commands'}" />
+          </StackPanel>
+        </Button>
         <Button Margin="0,0,8,8" Command="{Binding ShareCommand}">
           <StackPanel Orientation="Horizontal" Spacing="6">
             <PathIcon Classes="small" Data="{StaticResource Icon.Qrcode}" />
@@ -59,9 +66,12 @@
             <TextBlock Text="{l:T 'Map'}" />
           </StackPanel>
         </Button>
-        <Button Margin="0,0,8,8" Command="{Binding ToggleFavoriteCommand}">
+        <!-- Confirmed by the radio, so only while it's ready (the hint says why otherwise). -->
+        <Button Margin="0,0,8,8" Command="{Binding ToggleFavoriteCommand}" IsEnabled="{Binding CanToggleFavorite}"
+                ToolTip.Tip="{l:T 'Favorites are saved on your radio, so changing one needs the connection.'}" ToolTip.ShowOnDisabled="True">
           <StackPanel Orientation="Horizontal" Spacing="6">
-            <PathIcon Classes="small" Data="{StaticResource Icon.StarOutline}" />
+            <PathIcon Classes="small" Data="{StaticResource Icon.StarOutline}" IsVisible="{Binding !IsSettingFavorite}" />
+            <ProgressBar IsIndeterminate="True" Width="14" MinWidth="14" IsVisible="{Binding IsSettingFavorite}" VerticalAlignment="Center" />
             <TextBlock Text="{l:T 'Favorite'}" IsVisible="{Binding !IsFavorite}" />
             <TextBlock Text="{l:T 'Unfavorite'}" IsVisible="{Binding IsFavorite}" />
           </StackPanel>

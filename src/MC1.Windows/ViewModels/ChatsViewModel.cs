@@ -20,7 +20,8 @@ public sealed partial class ConversationListItem : ObservableObject
     public int Unread { get; init; }
     public int Mentions { get; init; }
     public bool IsMuted { get; init; }
-    public bool IsFavorite { get; init; }
+    /// <summary>Pinned on this PC (listed under "Pinned"); not the radio's favourite flag.</summary>
+    public bool IsPinned { get; init; }
     public bool IsRoomConnected { get; init; }
     public required string IconKey { get; init; }
     public required string AvatarText { get; init; }
@@ -28,13 +29,19 @@ public sealed partial class ConversationListItem : ObservableObject
     public string? AvatarIcon => ShowIcon ? IconKey : null;
     public required string AvatarColor { get; init; }
     public ChatFilter Kind { get; init; }
-    public bool HasUnread => Unread > 0;
+    /// <summary>Unread messages or unseen mentions (a chat marked unread counts one).</summary>
+    public bool IsUnread => Unread > 0 || Mentions > 0;
+    public bool HasUnread => IsUnread;
     public bool HasUnreadMuted => Unread > 0 && IsMuted;
-    public bool HasUnreadActive => Unread > 0 && !IsMuted;
+    public bool HasUnreadActive => IsUnread && !IsMuted;
+    public bool ShowCountBadge => Unread > 0 && !IsMuted;
     public bool HasMentions => Mentions > 0;
     public string UnreadText => Unread > 99 ? "99+" : Unread.ToString();
     public bool ShowIcon => Kind != ChatFilter.Direct;
 }
+
+/// <summary>A heading in the chat list ("Pinned", "Chats"), shown when some of the listed chats are pinned.</summary>
+public sealed record ChatSectionHeader(string Title);
 
 public sealed partial class ChatsViewModel : ViewModelBase
 {
@@ -54,7 +61,10 @@ public sealed partial class ChatsViewModel : ViewModelBase
         });
     }
 
+    /// <summary>The chats shown (after search and filter), in list order.</summary>
     public ObservableCollection<ConversationListItem> Conversations { get; } = new();
+    /// <summary>What the list shows: <see cref="Conversations"/> with "Pinned" and "Chats" headings when some are pinned.</summary>
+    public ObservableCollection<object> ListRows { get; } = new();
     /// <summary>Every conversation regardless of the current search/filter.</summary>
     public IReadOnlyList<ConversationListItem> AllItems => _all;
 
@@ -65,6 +75,11 @@ public sealed partial class ChatsViewModel : ViewModelBase
     [ObservableProperty] private bool _isEmpty = true;
     [ObservableProperty] private int _totalUnread;
     [ObservableProperty] private string _unreadSummary = "";
+    [ObservableProperty] private string _emptyTitle = "";
+    [ObservableProperty] private string _emptyHint = "";
+    /// <summary>The empty list offers "New chat" (no chats at all) or "Clear filter" (a filter hides them all).</summary>
+    [ObservableProperty] private bool _emptyOffersNewChat;
+    [ObservableProperty] private bool _emptyOffersClearFilter;
 
     public IReadOnlyList<ChatFilter> Filters { get; } = Enum.GetValues<ChatFilter>();
 
@@ -89,6 +104,12 @@ public sealed partial class ChatsViewModel : ViewModelBase
         Active?.SetOpen(visible);
     }
 
+    /// <summary>The open chat's row was clicked again: a chat marked unread while open counts as opened now.</summary>
+    public void ReopenActive(string key)
+    {
+        if (Active is { } a && a.Key == key) a.ReleaseUnreadHold();
+    }
+
     public void OpenByKey(string key)
     {
         Reload();
@@ -97,6 +118,7 @@ public sealed partial class ChatsViewModel : ViewModelBase
         Filter = ChatFilter.All;
         Search = "";
         Selected = Conversations.FirstOrDefault(c => c.Key == key) ?? item;
+        ReopenActive(key);
     }
 
     public void Reload()
@@ -126,7 +148,7 @@ public sealed partial class ChatsViewModel : ViewModelBase
                 Unread = c.UnreadCount,
                 Mentions = c.UnreadMentions,
                 IsMuted = c.IsMuted,
-                IsFavorite = c.IsFavorite,
+                IsPinned = c.IsPinned,
                 IconKey = Formatters.ContactIcon(c.ContactType),
                 AvatarText = Formatters.Initials(c.DisplayName),
                 Emoji = Formatters.AvatarEmoji(c.DisplayName),
@@ -148,6 +170,7 @@ public sealed partial class ChatsViewModel : ViewModelBase
                 Unread = ch.UnreadCount,
                 Mentions = ch.UnreadMentions,
                 IsMuted = ch.IsMuted,
+                IsPinned = ch.IsPinned,
                 IconKey = ch.IsPublic ? "Icon.Earth" : ch.IsHashtag ? "Icon.Pound" : "Icon.Lock",
                 AvatarText = ch.IsHashtag ? "#" : Formatters.Initials(ch.DisplayName),
                 AvatarColor = ch.IsPublic ? "#22A559" : Formatters.ColorFor(ch.Secret.ToHex()),
@@ -168,6 +191,7 @@ public sealed partial class ChatsViewModel : ViewModelBase
                 SortKey = Math.Max(r.LastActivity, (m?.Timestamp ?? 0) * 1000),
                 Unread = r.UnreadCount,
                 IsMuted = r.NotificationLevel == (int)NotificationLevel.Muted,
+                IsPinned = r.IsPinned,
                 IsRoomConnected = r.IsConnected,
                 IconKey = "Icon.ForumOutline",
                 AvatarText = Formatters.Initials(r.Name),
@@ -176,7 +200,8 @@ public sealed partial class ChatsViewModel : ViewModelBase
                 Kind = ChatFilter.Rooms,
             });
         }
-        _all = list.OrderByDescending(x => x.SortKey).ToList();
+        // Pinned chats first (newest first among them), then the rest.
+        _all = list.OrderByDescending(x => x.IsPinned).ThenByDescending(x => x.SortKey).ToList();
         TotalUnread = _all.Where(x => !x.IsMuted).Sum(x => x.Unread);
         var chats = _all.Count(x => x.Unread > 0);
         UnreadSummary = TotalUnread == 0 ? "" : L.Plural(chats, "{1} unread in {0} chat", "{1} unread in {0} chats", TotalUnread);
@@ -191,29 +216,87 @@ public sealed partial class ChatsViewModel : ViewModelBase
         return t.Length > 90 ? t[..90] + "…" : t;
     }
 
-    private void ApplyFilter()
+    /// <summary>
+    /// The chats to list for a search and filter, like the iPhone app: a search looks through every chat whatever the
+    /// filter (which stays selected), and a search of only spaces finds nothing rather than showing the filter.
+    /// </summary>
+    public static IReadOnlyList<ConversationListItem> FilterItems(IEnumerable<ConversationListItem> all, ChatFilter filter, string search)
     {
-        var q = Search.Trim();
-        var items = _all.Where(c => Filter switch
+        if (search.Length > 0)
         {
-            ChatFilter.Unread => c.Unread > 0,
+            var q = search.Trim();
+            if (q.Length == 0) return [];
+            return all.Where(c => c.Title.Contains(q, StringComparison.CurrentCultureIgnoreCase) || c.Preview.Contains(q, StringComparison.CurrentCultureIgnoreCase)).ToList();
+        }
+        return all.Where(c => filter switch
+        {
+            ChatFilter.Unread => c.IsUnread && !c.IsMuted,
             ChatFilter.Direct => c.Kind == ChatFilter.Direct,
             ChatFilter.Channels => c.Kind == ChatFilter.Channels,
             ChatFilter.Rooms => c.Kind == ChatFilter.Rooms,
             _ => true,
-        }).Where(c => q.Length == 0 || c.Title.Contains(q, StringComparison.OrdinalIgnoreCase) || c.Preview.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
+        }).ToList();
+    }
+
+    private void ApplyFilter()
+    {
+        var items = FilterItems(_all, Filter, Search);
         var selectedKey = Active?.Key ?? Selected?.Key;
         _rebuilding = true;
         try
         {
             Conversations.Clear();
-            foreach (var i in items) Conversations.Add(i);
+            ListRows.Clear();
+            var anyPinned = items.Any(i => i.IsPinned);
+            var othersHeaded = false;
+            if (anyPinned) ListRows.Add(new ChatSectionHeader(L.T("Pinned")));
+            foreach (var i in items)
+            {
+                if (anyPinned && !i.IsPinned && !othersHeaded)
+                {
+                    ListRows.Add(new ChatSectionHeader(L.T("Chats")));
+                    othersHeaded = true;
+                }
+                Conversations.Add(i);
+                ListRows.Add(i);
+            }
             // Keep the active conversation without recreating it.
             Selected = selectedKey is null ? null : Conversations.FirstOrDefault(c => c.Key == selectedKey);
         }
         finally { _rebuilding = false; }
         IsEmpty = Conversations.Count == 0;
+        UpdateEmptyState();
     }
+
+    private void UpdateEmptyState()
+    {
+        EmptyOffersNewChat = false;
+        EmptyOffersClearFilter = false;
+        if (Search.Length > 0)
+        {
+            EmptyTitle = Search.Trim() is { Length: > 0 } q ? L.F("No results for “{0}”", q) : L.T("No results");
+            EmptyHint = L.T("Check the spelling or try a new search.");
+            return;
+        }
+        if (Filter != ChatFilter.All && _all.Count > 0)
+        {
+            (EmptyTitle, EmptyHint) = Filter switch
+            {
+                ChatFilter.Unread => (L.T("No unread messages"), L.T("You're all caught up.")),
+                ChatFilter.Direct => (L.T("No direct messages"), L.T("Start a chat from Contacts.")),
+                ChatFilter.Channels => (L.T("No channels"), L.T("Join or create a channel.")),
+                _ => (L.T("No rooms"), L.T("Join a room from Contacts.")),
+            };
+            EmptyOffersClearFilter = true;
+            return;
+        }
+        EmptyTitle = L.T("No conversations yet");
+        EmptyHint = L.T("Connect your radio, then start a chat with a contact or join a channel.");
+        EmptyOffersNewChat = true;
+    }
+
+    [RelayCommand]
+    private void ClearFilter() => Filter = ChatFilter.All;
 
     [RelayCommand]
     private async Task NewChat()
@@ -226,7 +309,35 @@ public sealed partial class ChatsViewModel : ViewModelBase
     private void MarkRead(ConversationListItem item)
     {
         Core.Messages.MarkRead(item.Key);
-        Core.Notify(DataKind.Conversations);
+        ReopenActive(item.Key);
+    }
+
+    /// <summary>"Mark as read" / "Mark as unread": an unread chat stays unread until it is opened.</summary>
+    [RelayCommand]
+    private async Task ToggleReadState(ConversationListItem item)
+    {
+        var markRead = Core.Messages.IsUnread(item.Key);
+        await Guard(() =>
+        {
+            Core.Messages.SetReadState(item.Key, markRead);
+            // The chat on screen stays unread until it is opened again (its row clicked, or a message sent).
+            if (Active is { } a && a.Key == item.Key)
+            {
+                if (markRead) a.ReleaseUnreadHold();
+                else a.HoldUnread();
+            }
+            return Task.CompletedTask;
+        });
+    }
+
+    /// <summary>Pins the chat to the top of the list, or unpins it (on this PC; the radio's favourite flag is separate).</summary>
+    [RelayCommand]
+    private async Task TogglePin(ConversationListItem item)
+    {
+        // The row may be older than the saved pin (changed in the chat's details meanwhile): flip what is saved.
+        var pinned = Core.Messages.IsPinned(item.Key);
+        await Guard(() => { Core.Messages.SetPinned(item.Key, !pinned); return Task.CompletedTask; });
+        Reload();
     }
 
     [RelayCommand]
@@ -235,12 +346,10 @@ public sealed partial class ChatsViewModel : ViewModelBase
         var level = item.IsMuted ? NotificationLevel.All : NotificationLevel.Muted;
         if (item.Key.StartsWith("dm:") && Core.Contacts.Get(item.Key[3..]) is { } c) Core.Contacts.SetNotificationLevel(c, level);
         else if (item.Key.StartsWith("ch:") && Core.RadioId is { } rid && Core.Db.GetChannel(rid, int.Parse(item.Key[3..])) is { } ch) Core.Channels.SetNotificationLevel(ch, level);
-        else if (item.Key.StartsWith("room:") && Core.Db.GetRemoteSession(item.Key[5..]) is { } room)
-        {
-            room.NotificationLevel = (int)level;
-            Core.Db.UpsertRemoteSession(room);
-        }
+        else if (item.Key.StartsWith("room:") && Core.Db.GetRemoteSession(item.Key[5..]) is { } room) Core.Rooms.SetNotificationLevel(room, level);
         Core.Notify(DataKind.Conversations);
+        // Muted chats don't count towards the unread totals (taskbar, tray, lock screen).
+        Core.Messages.UpdateBadge();
     }
 
     [RelayCommand]
@@ -262,7 +371,8 @@ public sealed partial class ChatsViewModel : ViewModelBase
     [RelayCommand]
     private void MarkAllRead()
     {
-        foreach (var c in _all.Where(c => c.Unread > 0)) Core.Messages.MarkRead(c.Key);
+        foreach (var c in _all.Where(c => c.IsUnread)) Core.Messages.MarkRead(c.Key);
+        Active?.ReleaseUnreadHold();
         Reload();
     }
 }

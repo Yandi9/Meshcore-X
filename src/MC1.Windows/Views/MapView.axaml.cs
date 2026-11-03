@@ -27,6 +27,7 @@ public partial class MapView : UserControl
         if (DataContext is MapViewModel vm)
         {
             vm.VisibleBounds = () => Map.VisibleBounds();
+            vm.SelectionArea = () => Map.SelectionBounds();
             vm.ViewportSize = () => (Map.Bounds.Width, Map.Bounds.Height);
         }
     }

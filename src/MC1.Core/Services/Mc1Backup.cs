@@ -42,6 +42,14 @@ public sealed class Mc1Backup
     public static string DefaultFileName(DateTime now) => $"MC1 Backup {now:yyyy-MM-dd HHmmss}.{Extension}";
 
     /// <summary>One radio in the backup and its settings.</summary>
+    /// <summary>
+    /// The radio preset a backed-up radio was on: the one the phone recorded (if its settings still match), else the one
+    /// its frequency, bandwidth, SF and CR match.
+    /// </summary>
+    public static RadioPreset? PresetOf(Device d) =>
+        d.FrequencyKhz == 0 || d.BandwidthHz == 0 || d.SpreadingFactor == 0 ? null
+            : RadioPresets.Resolve(d.FrequencyKhz / 1000.0, d.BandwidthHz / 1000.0, d.SpreadingFactor, d.CodingRate, d.AppliedPresetId);
+
     public sealed record Device(
         string RadioId, byte[] PublicKey, string NodeName, uint FrequencyKhz, uint BandwidthHz, byte SpreadingFactor, byte CodingRate,
         sbyte TxPower, double Latitude, double Longitude, bool ManualAddContacts, byte MultiAcks, byte TelemetryModeBase,
@@ -83,7 +91,7 @@ public sealed class Mc1Backup
         };
     }
 
-    private static string? Decompress(byte[] data)
+    internal static string? Decompress(byte[] data)
     {
         // Plain JSON (e.g. a file that was decompressed by hand)
         var start = 0;
@@ -215,7 +223,7 @@ public sealed class Mc1Backup
                 Name = Str(c["name"]) ?? "",
                 CustomName = Str(c["nickname"]),
                 PublicKey = key.ToHex(),
-                Flags = (byte)Num(c["flags"]),
+                Flags = (byte)((byte)Num(c["flags"]) & ~(byte)ContactFlags.RemoteCliAllowed), // never a remote-CLI grant from a backup
                 Latitude = Num(c["latitude"]).ToString(Inv),
                 Longitude = Num(c["longitude"]).ToString(Inv),
                 LastAdvert = (uint)Num(c["lastAdvertTimestamp"]),
@@ -442,6 +450,7 @@ public sealed class Mc1Backup
                     ["isBlocked"] = c.IsBlocked,
                     ["isMuted"] = c.IsMuted,
                     ["isFavorite"] = c.IsFavorite,
+                    ["isPinned"] = c.IsPinned,
                     ["unreadCount"] = 0,
                     ["unreadMentionCount"] = 0,
                 };
@@ -465,7 +474,8 @@ public sealed class Mc1Backup
                     ["unreadCount"] = 0,
                     ["unreadMentionCount"] = 0,
                     ["notificationLevel"] = IosNotificationLevel(ch.NotificationLevel),
-                    ["isFavorite"] = false,
+                    ["isPinned"] = ch.IsPinned,
+                    ["isFavorite"] = ch.IsPinned, // what older iPhone versions read as a channel's pin
                     ["floodScopeModeRawValue"] = ch.FloodScope is null ? "inherit" : ch.FloodScope == "all" ? "allRegions" : "specific",
                 };
                 if (ch.FloodScope is { } fs && fs != "all") o["regionScope"] = fs.Replace("region:", "");
@@ -584,7 +594,21 @@ public sealed class Mc1Backup
     }
 
     /// <summary>The preferences the phone app shares with this one, under its own names.</summary>
-    private static JsonObject UserDefaultsFrom(AppSettings s) => new()
+    private static JsonObject UserDefaultsFrom(AppSettings s)
+    {
+        var o = UserDefaultsBase(s);
+        // "Your area" (radio preset recommendation), in the phone's format.
+        if (s.PresetCountry is { Length: 2 } country)
+            o["regionSelection"] = new JsonObject
+            {
+                ["countryCode"] = country,
+                ["administrativeAreaCode"] = s.PresetArea,
+                ["source"] = "manual",
+            };
+        return o;
+    }
+
+    private static JsonObject UserDefaultsBase(AppSettings s) => new()
     {
         ["appColorSchemePreference"] = s.Theme.ToLowerInvariant() switch { "light" => "light", "dark" => "dark", _ => "system" },
         ["showInlineImages"] = s.ShowInlineImages,
@@ -599,7 +623,7 @@ public sealed class Mc1Backup
         ["notifyLowBattery"] = s.NotifyLowBattery,
     };
 
-    // MARK: Restore (while disconnected)
+    // MARK: Restore
 
     public sealed record RestoreOptions(bool Name, bool RadioSettings, bool Position, bool OtherSettings, bool Channels, bool Contacts,
         bool Messages, bool SavedPaths, bool AppSettings);
@@ -608,14 +632,17 @@ public sealed class Mc1Backup
         bool SettingsRestored, bool RadioWritePending);
 
     /// <summary>
-    /// Restores one radio's data from the backup into this app while disconnected. Contacts, channels, messages and
-    /// saved paths go into the app right away; name, radio settings, channels and contacts are written to the radio
-    /// itself the next time it connects (see <see cref="PendingConfigService"/>).
+    /// Restores one radio's data from the backup into this app. Contacts, channels, messages and saved paths go into the
+    /// app right away; name, radio settings (preset and frequency), channels and contacts are written to the radio itself
+    /// — straight away when it's the connected radio (the caller applies <see cref="PendingConfigService"/>), otherwise
+    /// the next time it connects.
     /// </summary>
     /// <param name="targetRadioId">This app's radio to restore into (null: the one with the same key, or a new one).</param>
     public RestoreResult Restore(MeshApp app, Device d, string? targetRadioId, RestoreOptions o)
     {
-        if (app.IsConnected) throw new InvalidOperationException(L.T("Disconnect the radio before restoring a backup."));
+        // While connected: only once the radio has finished syncing. The connected radio's part is then written straight
+        // away by the caller (ApplyPendingNowAsync); another radio's waits until it connects.
+        if (app.IsConnected && app.IsInitialSyncRunning) throw new InvalidOperationException(L.T("Wait until the radio has finished syncing, then try again."));
         var db = app.Db;
         var target = targetRadioId is not null ? db.GetRadio(targetRadioId) : null;
         target ??= db.GetRadios().FirstOrDefault(r => r.PublicKey.AsSpan().SequenceEqual(d.PublicKey));
@@ -667,6 +694,17 @@ public sealed class Mc1Backup
             }
         }
 
+        // Pins: a backup can pin a chat (never unpin one), for restored and existing contacts and channels alike.
+        if (o.Contacts)
+            foreach (var c in ContactsOf(d))
+                if (Pinned(c, legacyFavorite: true) && Bytes(c["publicKey"]) is { Length: 32 } k && db.GetContactByKey(radioId, k) is { IsPinned: false } pc)
+                    db.SetContactPinned(pc.Id, true);
+        if (o.Channels)
+            foreach (var c in ChannelsOf(d))
+                if (Pinned(c, legacyFavorite: true) && Bytes(c["secret"]) is { Length: 16 } sec
+                    && db.GetChannels(radioId).FirstOrDefault(l => l.Secret.AsSpan().SequenceEqual(sec)) is { IsPinned: false } pch)
+                    db.SetChannelPinned(radioId, pch.Idx, true);
+
         var messages = 0;
         if (o.Messages) messages = ImportHistory(app, d, radioId).Messages;
 
@@ -705,9 +743,11 @@ public sealed class Mc1Backup
         };
         var hasWrite = pending.Sections != ConfigSections.None || pending.Channels.Count > 0 || pending.Contacts.Count > 0;
         if (hasWrite) app.PendingConfig.Save(pending);
-        if (o.RadioSettings && d.AppliedPresetId is { } presetId) app.Settings.Update(st => st.AppliedRadioPresets[radioId] = presetId);
+        // The preset the phone had the radio on (or the one its settings match), so the Radio page shows it by name.
+        if (o.RadioSettings && cfg.RadioSettings is not null && PresetOf(d) is { } preset)
+            app.Settings.Update(st => st.AppliedRadioPresets[radioId] = preset.Id);
 
-        app.SetOfflineRadio(radioId);
+        if (!app.IsConnected) app.SetOfflineRadio(radioId);
         app.Notify(DataKind.Contacts);
         app.Notify(DataKind.Channels);
         app.Notify(DataKind.TracePaths);
@@ -748,6 +788,11 @@ public sealed class Mc1Backup
             if (u["notifyNewContacts"] is JsonValue g) s.NotifyNewContacts = Bool(g);
             if (u["notificationSoundEnabled"] is JsonValue h) s.NotificationSound = Bool(h);
             if (u["notifyLowBattery"] is JsonValue i) s.NotifyLowBattery = Bool(i);
+            if (u["regionSelection"] is JsonObject region && Str(region["countryCode"]) is { Length: 2 } country)
+            {
+                s.PresetCountry = country.ToUpperInvariant();
+                s.PresetArea = Str(region["administrativeAreaCode"]);
+            }
             if (u["recentEmojis"] is JsonArray emoji && emoji.Count > 0) s.RecentEmoji = emoji.Select(x => Str(x)).Where(x => x is not null).Take(12).ToList()!;
         });
         return true;
@@ -772,6 +817,10 @@ public sealed class Mc1Backup
         try { return v.GetValue<JsonElement>() is { ValueKind: JsonValueKind.Number } e ? e.GetDouble() : fallback; }
         catch { return fallback; }
     }
+
+    /// <summary>A chat's pin in a backup; older backups only have <c>isFavorite</c>, which meant the same.</summary>
+    private static bool Pinned(JsonObject o, bool legacyFavorite) =>
+        o["isPinned"] is JsonValue p ? Bool(p) : legacyFavorite && Bool(o["isFavorite"]);
 
     private static bool Bool(JsonNode? n) => n is JsonValue v && (v.TryGetValue<bool>(out var b) ? b : Num(v) != 0);
 

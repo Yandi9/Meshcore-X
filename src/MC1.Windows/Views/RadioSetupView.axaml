@@ -23,6 +23,28 @@
     </StackPanel>
 
     <StackPanel Spacing="4">
+      <TextBlock Text="{l:T 'Where are you?'}" FontWeight="SemiBold" />
+      <Grid ColumnDefinitions="*,8,*">
+        <ComboBox ItemsSource="{Binding Area.Countries}" SelectedItem="{Binding Area.Country}" PlaceholderText="{l:T 'Country'}" HorizontalAlignment="Stretch">
+          <ComboBox.ItemTemplate>
+            <DataTemplate x:DataType="u:RegionalAreas+Country">
+              <TextBlock Text="{Binding Name}" />
+            </DataTemplate>
+          </ComboBox.ItemTemplate>
+        </ComboBox>
+        <ComboBox Grid.Column="2" ItemsSource="{Binding Area.Subdivisions}" SelectedItem="{Binding Area.Subdivision}" PlaceholderText="{Binding Area.SubdivisionPlaceholder}"
+                  IsVisible="{Binding Area.ShowSubdivisions}" HorizontalAlignment="Stretch">
+          <ComboBox.ItemTemplate>
+            <DataTemplate x:DataType="u:RegionalAreas+Subdivision">
+              <TextBlock Text="{Binding Name}" />
+            </DataTemplate>
+          </ComboBox.ItemTemplate>
+        </ComboBox>
+      </Grid>
+      <TextBlock Text="{l:T 'Used to recommend a preset. It doesn\'t change the radio.'}" Classes="caption" TextWrapping="Wrap" />
+    </StackPanel>
+
+    <StackPanel Spacing="4">
       <TextBlock Text="{l:T 'Radio preset'}" FontWeight="SemiBold" />
       <ComboBox ItemsSource="{Binding Presets}" SelectedItem="{Binding SelectedPreset}" HorizontalAlignment="Stretch" PlaceholderText="{l:T 'Keep the radio\'s current settings'}">
         <ComboBox.ItemTemplate>
@@ -67,7 +89,8 @@
       <TextBlock Text="{l:T 'You can change all of this later on the Radio page.'}" Classes="caption" VerticalAlignment="Center" TextWrapping="Wrap" />
       <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
         <ProgressBar IsIndeterminate="True" Width="60" IsVisible="{Binding Busy}" VerticalAlignment="Center" />
-        <Button Content="{l:T 'Skip'}" Command="{Binding SkipCommand}" IsEnabled="{Binding !Busy}" />
+        <Button Content="{l:T 'Skip for now'}" Command="{Binding SkipCommand}" IsEnabled="{Binding !Busy}"
+                ToolTip.Tip="{l:T 'Finish without changing the radio. You can set it up later on the Radio page.'}" />
         <Button Classes="accent" Content="{l:T 'Apply to radio'}" Command="{Binding ApplyCommand}" IsEnabled="{Binding !Busy}" />
       </StackPanel>
     </Grid>

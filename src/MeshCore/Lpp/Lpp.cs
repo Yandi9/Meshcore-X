@@ -163,7 +163,7 @@ public static class LppDecoder
         LppSensorType.Temperature => new LppValue.Float(I16(d) / 10.0),
         LppSensorType.Barometer => new LppValue.Float(U16(d) / 10.0),
         LppSensorType.Voltage => new LppValue.Float(U16(d) / 100.0),
-        LppSensorType.Current => new LppValue.Float(I16(d) / 1000.0),
+        LppSensorType.Current => new LppValue.Float(U16(d) / 1000.0), // unsigned milliamps (0–65.535 A)
         LppSensorType.Illuminance => new LppValue.Integer(U16(d)),
         LppSensorType.Altitude => new LppValue.Float(I16(d)),
         LppSensorType.Load => new LppValue.Float(I24(d, 0) / 1000.0),

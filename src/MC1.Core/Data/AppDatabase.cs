@@ -7,7 +7,8 @@ namespace MC1.Core.Data;
 /// <summary>SQLite persistence (replaces SwiftData on Windows).</summary>
 public sealed partial class AppDatabase
 {
-    private const int SchemaVersion = 1;
+    /// <summary>The version <see cref="Schema"/> creates; later columns are added by <see cref="Migrate"/>.</summary>
+    private const int BaseSchemaVersion = 1;
     private readonly string _connectionString;
 
     public AppDatabase(string path)
@@ -42,11 +43,14 @@ public sealed partial class AppDatabase
         using var c = Open();
         c.Execute("PRAGMA journal_mode=WAL;");
         var version = c.ExecuteScalar<long>("PRAGMA user_version;");
-        if (version < 1)
+        if (version < BaseSchemaVersion)
         {
             c.Execute(Schema);
-            c.Execute($"PRAGMA user_version={SchemaVersion};");
+            c.Execute($"PRAGMA user_version={BaseSchemaVersion};");
+            version = BaseSchemaVersion;
         }
+        // New and existing databases take the same steps, so every migration also runs on each fresh database.
+        Migrate(c, version);
     }
 
     public void Checkpoint()
@@ -228,18 +232,21 @@ public sealed partial class AppDatabase
         UpsertContact(c, r);
     }
 
+    /// <remarks>
+    /// An existing row keeps its chat state (unread counts, draft, pin): those change through their own updates, and a
+    /// contact read earlier (a list row, a dialog) must not put back older values. Last message/heard times only move forward.
+    /// </remarks>
     private static void UpsertContact(SqliteConnection c, ContactRecord r, SqliteTransaction? tx = null) =>
         c.Execute("""
             INSERT INTO Contacts(Id,RadioId,PublicKey,Name,Nickname,Type,TypeRaw,Flags,OutPathLength,OutPath,LastAdvert,Latitude,Longitude,
-                LastModified,IsBlocked,NotificationLevel,LastMessageAt,UnreadCount,UnreadMentions,LastHeard,InboundHops,DraftText)
+                LastModified,IsBlocked,NotificationLevel,LastMessageAt,UnreadCount,UnreadMentions,LastHeard,InboundHops,DraftText,IsPinned)
             VALUES(@Id,@RadioId,@PublicKey,@Name,@Nickname,@Type,@TypeRaw,@Flags,@OutPathLength,@OutPath,@LastAdvert,@Latitude,@Longitude,
-                @LastModified,@IsBlocked,@NotificationLevel,@LastMessageAt,@UnreadCount,@UnreadMentions,@LastHeard,@InboundHops,@DraftText)
+                @LastModified,@IsBlocked,@NotificationLevel,@LastMessageAt,@UnreadCount,@UnreadMentions,@LastHeard,@InboundHops,@DraftText,@IsPinned)
             ON CONFLICT(Id) DO UPDATE SET PublicKey=excluded.PublicKey, Name=excluded.Name, Nickname=excluded.Nickname, Type=excluded.Type,
                 TypeRaw=excluded.TypeRaw, Flags=excluded.Flags, OutPathLength=excluded.OutPathLength, OutPath=excluded.OutPath,
                 LastAdvert=excluded.LastAdvert, Latitude=excluded.Latitude, Longitude=excluded.Longitude, LastModified=excluded.LastModified,
-                IsBlocked=excluded.IsBlocked, NotificationLevel=excluded.NotificationLevel, LastMessageAt=excluded.LastMessageAt,
-                UnreadCount=excluded.UnreadCount, UnreadMentions=excluded.UnreadMentions, LastHeard=excluded.LastHeard,
-                InboundHops=excluded.InboundHops, DraftText=excluded.DraftText
+                IsBlocked=excluded.IsBlocked, NotificationLevel=excluded.NotificationLevel, LastMessageAt=MAX(LastMessageAt, excluded.LastMessageAt),
+                LastHeard=MAX(LastHeard, excluded.LastHeard), InboundHops=excluded.InboundHops
             """, r, tx);
 
     /// <summary>Deletes local contacts that are no longer on the radio (full sync pruning). Keeps contacts with message history
@@ -250,7 +257,10 @@ public sealed partial class AppDatabase
         var keep = new HashSet<string>(keepKeys.Select(k => Convert.ToHexString(k)));
         var all = c.Query<ContactRecord>("SELECT Id, PublicKey FROM Contacts WHERE RadioId=@radioId", new { radioId });
         var remove = all.Where(x => !keep.Contains(Convert.ToHexString(x.PublicKey))).Select(x => x.Id).ToList();
-        foreach (var id in remove) c.Execute("DELETE FROM Contacts WHERE Id=@id", new { id });
+        if (remove.Count == 0) return remove;
+        using var tx = c.BeginTransaction();
+        foreach (var id in remove) c.Execute("DELETE FROM Contacts WHERE Id=@id", new { id }, tx);
+        tx.Commit();
         return remove;
     }
 
@@ -368,15 +378,26 @@ public sealed partial class AppDatabase
         return c.QuerySingleOrDefault<ChannelRecord>("SELECT * FROM Channels WHERE RadioId=@radioId AND Idx=@idx", new { radioId, idx });
     }
 
+    /// <summary>Saves a channel slot's name and key (from the radio).</summary>
+    /// <remarks>
+    /// The same channel (same key) keeps its local state — unread counts, notifications, region, draft and pin change
+    /// through their own updates, so a channel read earlier can't put back older values. A different channel in the
+    /// slot (new key) starts with the values given.
+    /// </remarks>
     public void UpsertChannel(ChannelRecord r)
     {
         using var c = Open();
         c.Execute("""
-            INSERT INTO Channels(Id,RadioId,Idx,Name,Secret,LastMessageAt,UnreadCount,UnreadMentions,NotificationLevel,FloodScope,DraftText)
-            VALUES(@Id,@RadioId,@Idx,@Name,@Secret,@LastMessageAt,@UnreadCount,@UnreadMentions,@NotificationLevel,@FloodScope,@DraftText)
-            ON CONFLICT(RadioId, Idx) DO UPDATE SET Name=excluded.Name, Secret=excluded.Secret, LastMessageAt=excluded.LastMessageAt,
-                UnreadCount=excluded.UnreadCount, UnreadMentions=excluded.UnreadMentions, NotificationLevel=excluded.NotificationLevel,
-                FloodScope=excluded.FloodScope, DraftText=excluded.DraftText
+            INSERT INTO Channels(Id,RadioId,Idx,Name,Secret,LastMessageAt,UnreadCount,UnreadMentions,NotificationLevel,FloodScope,DraftText,IsPinned)
+            VALUES(@Id,@RadioId,@Idx,@Name,@Secret,@LastMessageAt,@UnreadCount,@UnreadMentions,@NotificationLevel,@FloodScope,@DraftText,@IsPinned)
+            ON CONFLICT(RadioId, Idx) DO UPDATE SET Name=excluded.Name, Secret=excluded.Secret,
+                LastMessageAt=CASE WHEN Secret IS excluded.Secret THEN MAX(LastMessageAt, excluded.LastMessageAt) ELSE excluded.LastMessageAt END,
+                UnreadCount=CASE WHEN Secret IS excluded.Secret THEN UnreadCount ELSE excluded.UnreadCount END,
+                UnreadMentions=CASE WHEN Secret IS excluded.Secret THEN UnreadMentions ELSE excluded.UnreadMentions END,
+                NotificationLevel=CASE WHEN Secret IS excluded.Secret THEN NotificationLevel ELSE excluded.NotificationLevel END,
+                FloodScope=CASE WHEN Secret IS excluded.Secret THEN FloodScope ELSE excluded.FloodScope END,
+                DraftText=CASE WHEN Secret IS excluded.Secret THEN DraftText ELSE excluded.DraftText END,
+                IsPinned=CASE WHEN Secret IS excluded.Secret THEN IsPinned ELSE excluded.IsPinned END
             """, r);
     }
 

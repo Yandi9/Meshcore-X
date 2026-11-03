@@ -75,6 +75,8 @@ public static class DirectMessageCrypto
     public const int MacSize = 2;
     public const int HeaderSize = 2;
     public const int MinPacketSize = HeaderSize + MacSize + 16;
+    private const int AttemptBitCount = 2;
+    private const int SignedAuthorPrefixSize = 4;
 
     public abstract record DecryptResult
     {
@@ -109,7 +111,9 @@ public static class DirectMessageCrypto
         if (pt is null || pt.Length < 5) return new DecryptResult.DecryptionFailed();
         var ts = pt.ReadUInt32LE(0);
         var ta = pt[4];
-        var body = pt.From(5).TrimAtNull();
+        // [timestamp 4][type<<2 | attempt][author prefix 4, signed text only][text]
+        var authorPrefixSize = (ta >> AttemptBitCount) == (byte)TextType.Signed ? SignedAuthorPrefixSize : 0;
+        var body = pt.From(5 + authorPrefixSize).TrimAtNull();
         return new DecryptResult.Success(ts, ta, body.Length == 0 ? "" : body.TryDecodeUtf8());
     }
 
@@ -173,6 +177,11 @@ public static class TransportCodeRegionResolver
     }
 
     private static ushort RewriteReserved(ushort raw) => raw == 0 ? (ushort)1 : raw == 0xFFFF ? (ushort)0xFFFE : raw;
+
+    /// <summary>A stored transport code is unscoped when its first little-endian UInt16 (read from the start of the
+    /// given buffer) is 0. Codes shorter than 2 bytes are not unscoped.</summary>
+    public static bool IsUnscoped(byte[]? transportCode) =>
+        transportCode is { Length: >= 2 } && transportCode.ReadUInt16LE(0) == 0;
 
     internal static ushort CalcTransportCodeRewriteForTest(ushort raw) => RewriteReserved(raw);
 

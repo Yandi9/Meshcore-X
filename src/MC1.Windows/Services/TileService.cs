@@ -1,12 +1,18 @@
 using System.Collections.Concurrent;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
+using MC1.Core.Maps;
 using MC1.Core.Services;
 
 namespace MC1.Windows.Services;
 
+/// <param name="IsDark">A dark basemap: markers' labels are drawn dark on it whatever the app's theme.</param>
 public sealed record MapLayerInfo(string Id, string Name, string UrlTemplate, string Attribution, int MaxZoom, string[] Subdomains, int MaxOfflineZoom,
-    bool IsVector = false, string? Background = null);
+    bool IsVector = false, string? Background = null, bool IsDark = false)
+{
+    /// <summary>What can be saved of this layer for offline use.</summary>
+    public OfflineMapProfile Offline => OfflineMapPolicy.Profile(Id);
+}
 
 /// <summary>Raster map tiles with a memory LRU + disk cache (%APPDATA%\MeshCore\tiles).</summary>
 public sealed class TileService
@@ -16,10 +22,13 @@ public sealed class TileService
     public static readonly IReadOnlyList<MapLayerInfo> Layers =
     [
         new("Standard", "Standard", "https://tile.openstreetmap.org/{z}/{x}/{y}.png", "© OpenStreetMap contributors", 19, [], 16),
-        // Vector tiles drawn on this PC with OpenFreeMap's "dark" style (tiles.openfreemap.org/styles/dark).
-        new("Dark", "Dark", VectorTiles.OpenFreeMapSource.StyleUrl, "OpenFreeMap © OpenMapTiles Data from OpenStreetMap", 19, [], 16, IsVector: true, Background: "#0C0C0C"),
+        // Vector tiles drawn on this PC with OpenFreeMap's "dark" style (tiles.openfreemap.org/styles/dark). Offline it
+        // keeps the vector data (zoom 14 at most) and draws every zoom from it.
+        new("Dark", "Dark", VectorTiles.OpenFreeMapSource.StyleUrl, "OpenFreeMap © OpenMapTiles Data from OpenStreetMap", 19, [], OfflineMapPolicy.VectorDataMaxZoom + 1,
+            IsVector: true, Background: "#0C0C0C", IsDark: true),
         new("Satellite", "Satellite", "https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", "Imagery © Esri, Maxar, Earthstar Geographics", 19, [], 17),
-        new("Topo", "Topographic", "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", "© OpenStreetMap contributors, SRTM · © OpenTopoMap (CC-BY-SA)", 17, ["a", "b", "c"], 15),
+        // View only: no offline downloads (OpenTopoMap's terms don't clearly allow them); areas saved earlier still show.
+        new("Topo", "Topographic", "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", "© OpenStreetMap contributors, SRTM · © OpenTopoMap (CC-BY-SA)", 17, ["a", "b", "c"], 0),
     ];
 
     public static MapLayerInfo Layer(string? id) => Layers.FirstOrDefault(l => l.Id == id) ?? Layers[0];
@@ -44,9 +53,36 @@ public sealed class TileService
 
     public bool OfflineOnly { get; set; }
 
-    private static string Key(string layer, int z, int x, int y) => $"{layer}/{z}/{x}/{y}";
+    /// <summary>
+    /// The cache folder of a layer's map images. The vector map draws its place names in the app's language, so its
+    /// images are kept per language ("Dark-es"); the vector data they're drawn from is shared.
+    /// </summary>
+    public static string CacheLayer(string layer)
+    {
+        if (Layer(layer) is not { IsVector: true } l) return layer;
+        var lang = MapLabelLocalizer.NameLanguage(L.Code);
+        return lang == MapLabelLocalizer.DefaultLanguageCode ? l.Id : $"{l.Id}-{lang}";
+    }
 
-    private static string CachePath(string layer, int z, int x, int y) => Path.Combine(AppPaths.TileCache, layer, z.ToString(), x.ToString(), y + ".tile");
+    private static string Key(string layer, int z, int x, int y) => $"{CacheLayer(layer)}/{z}/{x}/{y}";
+
+    private static string CachePath(string layer, int z, int x, int y) => Path.Combine(AppPaths.TileCache, CacheLayer(layer), z.ToString(), x.ToString(), y + ".tile");
+
+    /// <summary>Writes a cache file through a temporary file, so an interrupted write never leaves half a tile behind.</summary>
+    internal static async Task WriteAtomicAsync(string path, byte[] bytes, CancellationToken ct)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var tmp = path + "." + Guid.NewGuid().ToString("N")[..8] + ".part";
+        try
+        {
+            await File.WriteAllBytesAsync(tmp, bytes, ct).ConfigureAwait(false);
+            File.Move(tmp, path, true);
+        }
+        finally
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* best effort */ }
+        }
+    }
 
     private string Url(MapLayerInfo l, int z, int x, int y)
     {
@@ -96,7 +132,17 @@ public sealed class TileService
             var bytes = await FetchBytesAsync(layer, z, x, y, OfflineOnly).ConfigureAwait(false);
             if (bytes is null) { _failed[key] = DateTime.UtcNow; return; }
             Bitmap bmp;
-            using (var ms = new MemoryStream(bytes)) bmp = new Bitmap(ms);
+            try
+            {
+                using var ms = new MemoryStream(bytes);
+                bmp = new Bitmap(ms);
+            }
+            catch
+            {
+                // A damaged cache file (e.g. from an older interrupted download): drop it so it's fetched again.
+                try { File.Delete(CachePath(layer, z, x, y)); } catch { /* in use */ }
+                throw;
+            }
             lock (_lock)
             {
                 if (!_memory.ContainsKey(key))
@@ -127,10 +173,9 @@ public sealed class TileService
         if (Layer(layer) is { IsVector: true })
         {
             // Drawn here from vector tiles (cached separately), then kept like any other tile.
-            var png = await VectorTiles.OpenFreeMapSource.Dark.RenderTileAsync(z, x, y, offlineOnly, ct).ConfigureAwait(false);
+            var png = await VectorTiles.OpenFreeMapSource.Dark.RenderTileAsync(z, x, y, offlineOnly, ct, L.Code).ConfigureAwait(false);
             if (png is null) return null;
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            await File.WriteAllBytesAsync(path, png, ct).ConfigureAwait(false);
+            await WriteAtomicAsync(path, png, ct).ConfigureAwait(false);
             return png;
         }
         if (offlineOnly) return null;
@@ -141,45 +186,35 @@ public sealed class TileService
             using var resp = await _http.GetAsync(Url(l, z, x, y), ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode) return null;
             var bytes = await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            await File.WriteAllBytesAsync(path, bytes, ct).ConfigureAwait(false);
+            await WriteAtomicAsync(path, bytes, ct).ConfigureAwait(false);
             return bytes;
         }
         finally { _gate.Release(); }
     }
 
-    public static int CountTiles(double north, double south, double west, double east, int minZ, int maxZ)
+    /// <summary>
+    /// Saves an area of a layer for offline use, from zoom 1 up to <paramref name="maxZoom"/>. Files already saved are
+    /// skipped, so running it again after an interruption continues where it stopped. A vector layer saves its vector
+    /// data (drawn later, at any zoom). Returns how many files couldn't be downloaded.
+    /// </summary>
+    public async Task<int> DownloadAreaAsync(string layer, GeoBounds area, int maxZoom, IProgress<(int Done, int Total)>? progress, CancellationToken ct)
     {
-        var total = 0;
-        for (var z = minZ; z <= maxZ; z++)
-        {
-            var (x0, y0) = MapMath.TileXY(north, west, z);
-            var (x1, y1) = MapMath.TileXY(south, east, z);
-            total += (Math.Abs(x1 - x0) + 1) * (Math.Abs(y1 - y0) + 1);
-        }
-        return total;
-    }
-
-    /// <summary>Downloads every tile of an area for offline use.</summary>
-    public async Task<int> DownloadAreaAsync(string layer, double north, double south, double west, double east, int minZ, int maxZ, IProgress<(int Done, int Total)>? progress, CancellationToken ct)
-    {
-        var total = CountTiles(north, south, west, east, minZ, maxZ);
+        var info = Layer(layer);
+        var profile = info.Offline;
+        if (!profile.AllowsDownload) throw new InvalidOperationException(L.T("This map layer can't be downloaded for offline use."));
+        var jobs = OfflineMapPolicy.Tiles(area, OfflineMapPolicy.DownloadZooms(profile, maxZoom)).ToList();
+        var total = jobs.Count;
         var done = 0;
         var failed = 0;
-        var jobs = new List<(int Z, int X, int Y)>();
-        for (var z = minZ; z <= maxZ; z++)
-        {
-            var (x0, y0) = MapMath.TileXY(north, west, z);
-            var (x1, y1) = MapMath.TileXY(south, east, z);
-            for (var x = Math.Min(x0, x1); x <= Math.Max(x0, x1); x++)
-                for (var y = Math.Min(y0, y1); y <= Math.Max(y0, y1); y++)
-                    jobs.Add((z, x, y));
-        }
+        if (info.IsVector) await VectorTiles.OpenFreeMapSource.Dark.PrepareOfflineAsync(ct).ConfigureAwait(false);
         await Parallel.ForEachAsync(jobs, new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct }, async (j, token) =>
         {
             try
             {
-                if (await FetchBytesAsync(layer, j.Z, j.X, j.Y, false, token).ConfigureAwait(false) is null) Interlocked.Increment(ref failed);
+                var ok = info.IsVector
+                    ? await VectorTiles.OpenFreeMapSource.Dark.SaveVectorTileAsync(j.Z, j.X, j.Y, token).ConfigureAwait(false)
+                    : File.Exists(CachePath(layer, j.Z, j.X, j.Y)) || await FetchBytesAsync(layer, j.Z, j.X, j.Y, false, token).ConfigureAwait(false) is not null;
+                if (!ok) Interlocked.Increment(ref failed);
             }
             catch (OperationCanceledException) { throw; }
             catch { Interlocked.Increment(ref failed); }
@@ -187,6 +222,17 @@ public sealed class TileService
             if (d % 8 == 0 || d == total) progress?.Report((d, total));
         }).ConfigureAwait(false);
         return failed;
+    }
+
+    /// <summary>Free space on the drive holding the map cache, or null when unknown.</summary>
+    public static long? AvailableBytes()
+    {
+        try
+        {
+            var root = Path.GetPathRoot(Path.GetFullPath(AppPaths.TileCache));
+            return string.IsNullOrEmpty(root) ? null : new DriveInfo(root).AvailableFreeSpace;
+        }
+        catch { return null; }
     }
 
     public static long CacheSizeBytes()

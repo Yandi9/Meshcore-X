@@ -14,7 +14,14 @@ public sealed class ToastNotifier : INotifier
     {
         _core = core;
         ToastNotificationManagerCompat.OnActivated += OnActivated;
+        // A chat that was read (opened, or marked read) takes its notifications down.
+        _core.Messages.ConversationRead += key =>
+        {
+            try { ToastNotificationManagerCompat.History.Remove(TagFor(key), "messages"); } catch { /* not shown, or not supported */ }
+        };
     }
+
+    private static string TagFor(string conversationKey) => Math.Abs(conversationKey.GetHashCode()).ToString();
 
     private bool Silent => !_core.Settings.Current.NotificationSound;
 
@@ -22,9 +29,12 @@ public sealed class ToastNotifier : INotifier
     {
         try
         {
+            // The radio the message came in on: a reply may only go out through that radio.
+            var radio = _core.Messages.RadioIdFor(conversationKey) ?? "";
             var b = new ToastContentBuilder()
                 .AddArgument("action", "open")
                 .AddArgument("key", conversationKey)
+                .AddArgument("radio", radio)
                 .AddText(title, hintMaxLines: 1)
                 .AddText(body)
                 .AddAudio(new Uri("ms-winsoundevent:Notification.IM"), silent: Silent);
@@ -35,12 +45,13 @@ public sealed class ToastNotifier : INotifier
                      .SetContent(L.T("Send"))
                      .AddArgument("action", "reply")
                      .AddArgument("key", conversationKey)
+                     .AddArgument("radio", radio)
                      .SetTextBoxId("reply"));
             }
             b.Show(t =>
             {
                 t.Group = "messages";
-                t.Tag = Math.Abs(conversationKey.GetHashCode()).ToString();
+                t.Tag = TagFor(conversationKey);
             });
         }
         catch (Exception ex) { _core.Log.Warn("Toast", ex.Message); }
@@ -67,6 +78,7 @@ public sealed class ToastNotifier : INotifier
         var args = ToastArguments.Parse(e.Argument);
         args.TryGetValue("action", out var action);
         args.TryGetValue("key", out var key);
+        args.TryGetValue("radio", out var radio);
         Dispatcher.UIThread.Post(async () =>
         {
             var main = AppHost.Main;
@@ -74,9 +86,9 @@ public sealed class ToastNotifier : INotifier
             switch (action)
             {
                 case "reply" when key is not null && e.UserInput.TryGetValue("reply", out var v) && v is string text && !string.IsNullOrWhiteSpace(text):
-                    await QuickReply(key, text.Trim());
+                    await QuickReply(radio, key, text.Trim());
                     break;
-                case "open" when key is not null:
+                case "open" when key is not null && (string.IsNullOrEmpty(radio) || radio == _core.RadioId):
                     main.OpenConversation(key);
                     break;
                 case "discover":
@@ -91,18 +103,12 @@ public sealed class ToastNotifier : INotifier
         });
     }
 
-    private async Task QuickReply(string key, string text)
+    private async Task QuickReply(string? radio, string key, string text)
     {
         try
         {
-            if (!_core.IsConnected) throw new InvalidOperationException(L.T("Not connected to a radio."));
-            if (key.StartsWith("dm:") && _core.Contacts.Get(key[3..]) is { } contact)
-                _core.Messages.QueueDirectMessage(contact, text);
-            else if (key.StartsWith("ch:") && int.TryParse(key[3..], out var idx))
-                _core.Messages.QueueChannelMessage(idx, text);
-            else if (key.StartsWith("room:") && _core.Db.GetRemoteSession(key[5..]) is { } room)
-                _core.Rooms.Post(room, text);
-            _core.Messages.MarkRead(key);
+            // Rejected when this notification came from another radio than the one connected now.
+            _core.Messages.SendQuickReply(string.IsNullOrEmpty(radio) ? null : radio, key, text);
         }
         catch (Exception ex)
         {

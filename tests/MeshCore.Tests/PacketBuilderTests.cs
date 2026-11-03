@@ -69,11 +69,11 @@ public class PacketBuilderTests
     [Fact] public void SendTrace() => Assert.Equal(new byte[] { 0x24, 0x39, 0x30, 0x00, 0x00, 0x32, 0x09, 0x01, 0x00, 0x00 }, PacketBuilder.SendTrace(12345, 67890, 0));
 
     [Fact]
-    public void UpdateContactIs147Bytes()
+    public void UpdateContactIs144Bytes()
     {
         var c = new MeshContact(Key32, ContactType.Chat, 1, ContactFlags.Favorite, 0xFF, [], "Alice", T, 1, 2, T);
         var frame = PacketBuilder.UpdateContact(c);
-        Assert.Equal(147, frame.Length);
+        Assert.Equal(144, frame.Length); // upstream 18f25069: coordinates included, last_mod omitted
         Assert.Equal((byte)CommandCode.UpdateContact, frame[0]);
         Assert.Equal(0xFF, frame[35]);
     }

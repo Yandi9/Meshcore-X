@@ -395,6 +395,9 @@
     <Setter Property="Foreground" Value="{DynamicResource App.Danger}" />
     <Setter Property="TextWrapping" Value="Wrap" />
   </Style>
+  <Style Selector="TextBlock.warning">
+    <Setter Property="Foreground" Value="{DynamicResource App.Warning}" />
+  </Style>
   <Style Selector="Border.banner">
     <Setter Property="Background" Value="{DynamicResource App.Selection}" />
     <Setter Property="CornerRadius" Value="8" />

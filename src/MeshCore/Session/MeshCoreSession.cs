@@ -8,12 +8,10 @@ namespace MeshCore;
 /// </summary>
 public sealed partial class MeshCoreSession : IAsyncDisposable
 {
-    private readonly SemaphoreSlim _requestLock = new(1, 1);
-    private readonly SemaphoreSlim _otherParamsLock = new(1, 1);
     private readonly object _stateLock = new();
     private CancellationTokenSource? _receiveCts;
     private Task? _receiveTask;
-    private bool _isRunning;
+    private volatile bool _isRunning;
     private ConnectionState _connectionState = ConnectionState.Disconnected;
 
     // auto message fetch
@@ -35,7 +33,19 @@ public sealed partial class MeshCoreSession : IAsyncDisposable
     public ContactManager Contacts { get; } = new();
     public SelfInfo? SelfInfo { get; private set; }
     public DateTimeOffset? DeviceTime { get; private set; }
+
+    /// <summary>The radio's capabilities from the last device-info reply (<see cref="QueryDeviceAsync"/>), if any.
+    /// Firmware-gated commands check this; when it is unknown they are sent and the radio decides.</summary>
+    public DeviceCapabilities? DeviceCapabilities { get; private set; }
+
     public bool IsRunning => _isRunning;
+
+    /// <summary>Orders every request/response exchange on the wire (one in flight at a time).</summary>
+    internal RequestResponseSerializer RequestSerializer { get; } = new();
+
+    /// <summary>Orders configuration read-modify-write workflows (other params) through their cache refresh.
+    /// Separate from <see cref="RequestSerializer"/>, which is not reentrant.</summary>
+    internal RequestResponseSerializer ConfigSerializer { get; } = new();
     public ConnectionState ConnectionState { get { lock (_stateLock) return _connectionState; } }
 
     /// <summary>Raised (on a background thread) whenever the session connection state changes.</summary>
@@ -120,7 +130,7 @@ public sealed partial class MeshCoreSession : IAsyncDisposable
     public void HandleReceived(byte[] data)
     {
         if (data.Length == 0) return;
-        FrameTraced?.Invoke(false, data);
+        FrameTraced?.Invoke(false, RedactForTrace(data, ResponseCode.CliReply));
         var e = PacketParser.Parse(data);
         if (e is MeshEvent.StatusResponseEvent sr && sr.Response.Layout == StatusLayout.Repeater
             && Contacts.GetByKeyPrefix(sr.Response.PublicKeyPrefix) is { Type: ContactType.Room })
@@ -132,9 +142,29 @@ public sealed partial class MeshCoreSession : IAsyncDisposable
         {
             case MeshEvent.CurrentTime t: DeviceTime = t.Time; break;
             case MeshEvent.SelfInfoEvent s: SelfInfo = s.Info; break;
+            case MeshEvent.DeviceInfo d: DeviceCapabilities = d.Info; break;
         }
         Dispatcher.Dispatch(e);
     }
+
+    /// <summary>Radio CLI frames can carry a WiFi password or a BLE PIN, so the trace shows only their opcode.</summary>
+    private static byte[] RedactForTrace(byte[] frame, ResponseCode? cliReply = null) =>
+        frame.Length > 1 && (cliReply is { } r ? frame[0] == (byte)r : frame[0] == (byte)CommandCode.RunCliCommand)
+            ? [frame[0]]
+            : frame;
+
+    /// <summary>Throws <see cref="MeshCoreErrorKind.Unsupported"/> when the radio's firmware is known to be older than
+    /// <paramref name="minimum"/>. Unknown capabilities let the command through (the radio answers "unsupported").</summary>
+    private void RequireFirmware(byte minimum, string feature)
+    {
+        if (DeviceCapabilities is { } caps && caps.FirmwareVersion < minimum)
+            throw MeshCoreException.Unsupported(minimum, feature);
+    }
+
+    /// <summary>A stopped session reports cancellation, not a radio timeout or a lost link (Swift CancellationError).</summary>
+    private Exception StoppedOr(Exception e) => _isRunning ? e : SessionStopped();
+
+    private static OperationCanceledException SessionStopped() => new("The radio session was stopped.");
 
     // MARK: Subscriptions
 
@@ -165,10 +195,15 @@ public sealed partial class MeshCoreSession : IAsyncDisposable
         public static readonly Match<T> Skip = new(Disposition.Ignore);
     }
 
+    /// <summary>
+    /// Writes one frame. A stopped session never writes (the transport may survive for the next session): it throws
+    /// <see cref="OperationCanceledException"/>. A disconnected transport throws <see cref="MeshCoreErrorKind.NotConnected"/>.
+    /// </summary>
     public async Task SendRawAsync(byte[] data, CancellationToken ct = default)
     {
         if (!Transport.IsConnected) throw MeshCoreException.NotConnected();
-        FrameTraced?.Invoke(true, data);
+        if (!_isRunning) throw SessionStopped();
+        FrameTraced?.Invoke(true, RedactForTrace(data));
         try
         {
             await Transport.SendAsync(data, ct).ConfigureAwait(false);
@@ -179,21 +214,25 @@ public sealed partial class MeshCoreSession : IAsyncDisposable
         }
     }
 
-    internal async Task<T> WithSerialization<T>(Func<Task<T>> operation, CancellationToken ct)
-    {
-        await _requestLock.WaitAsync(ct).ConfigureAwait(false);
-        try { return await operation().ConfigureAwait(false); }
-        finally { _requestLock.Release(); }
-    }
+    internal Task<T> WithSerialization<T>(Func<Task<T>> operation, CancellationToken ct) =>
+        RequestSerializer.WithSerializationAsync(operation, ct);
 
     internal Task<T> SendAndMatchAsync<T>(byte[] data, Func<MeshEvent, Match<T>> matcher, TimeSpan? timeout = null, CancellationToken ct = default) =>
-        WithSerialization(() => SendAndMatchUnserialized(data, matcher, timeout, ct), ct);
+        WithSerialization(() => SendAndMatchHoldingSerialization(data, matcher, timeout, ct), ct);
 
-    private async Task<T> SendAndMatchUnserialized<T>(byte[] data, Func<MeshEvent, Match<T>> matcher, TimeSpan? timeout, CancellationToken ct)
+    /// <summary>
+    /// One send-and-wait exchange; the caller holds <see cref="RequestSerializer"/> for the whole exchange.
+    /// <paramref name="beforeSend"/> runs just before the write (it may throw to prevent it). With
+    /// <paramref name="drainOnCancel"/> the wait ignores <paramref name="ct"/> once the frame is written, so a cancelled
+    /// caller still consumes its own reply and doesn't leave an orphan for the next command.
+    /// </summary>
+    internal async Task<T> SendAndMatchHoldingSerialization<T>(byte[] data, Func<MeshEvent, Match<T>> matcher, TimeSpan? timeout,
+        CancellationToken ct, Action? beforeSend = null, bool drainOnCancel = false)
     {
         using var sub = Dispatcher.Subscribe();
+        beforeSend?.Invoke();
         await SendRawAsync(data, ct).ConfigureAwait(false);
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var cts = drainOnCancel ? new CancellationTokenSource() : CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout ?? Configuration.DefaultTimeout);
         try
         {
@@ -206,12 +245,20 @@ public sealed partial class MeshCoreSession : IAsyncDisposable
                 if (m.Kind == Disposition.Failure) throw m.Error!;
             }
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (drainOnCancel || !ct.IsCancellationRequested)
         {
-            throw MeshCoreException.Timeout();
+            throw StoppedOr(MeshCoreException.Timeout());
         }
-        throw new MeshCoreException(MeshCoreErrorKind.ConnectionLost);
+        throw StoppedOr(new MeshCoreException(MeshCoreErrorKind.ConnectionLost));
     }
+
+    /// <summary>Matcher for a plain OK / firmware error reply.</summary>
+    internal static Match<bool> OkOrDeviceError(MeshEvent e) => e switch
+    {
+        MeshEvent.Ok { Value: null } => Match<bool>.Ok(true),
+        MeshEvent.Error err => Match<bool>.Fail(MeshCoreException.Device(err.Code)),
+        _ => Match<bool>.Skip,
+    };
 
     internal Task<T> SendAndWaitAsync<T>(byte[] data, Func<MeshEvent, T?> pick, TimeSpan? timeout = null, CancellationToken ct = default) where T : class =>
         SendAndMatchAsync(data, e => pick(e) is { } v ? Match<T>.Ok(v) : Match<T>.Skip, timeout, ct);

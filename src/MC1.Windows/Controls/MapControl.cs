@@ -7,6 +7,7 @@ using Avalonia.Data;
 using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
+using MC1.Core.Maps;
 using MC1.Windows.Services;
 
 namespace MC1.Windows.Controls;
@@ -44,8 +45,9 @@ public sealed class MapControl : Control
         AvaloniaProperty.Register<MapControl, double>(nameof(CenterLongitude), -98.35, defaultBindingMode: BindingMode.TwoWay);
     public static readonly StyledProperty<double> ZoomProperty =
         AvaloniaProperty.Register<MapControl, double>(nameof(Zoom), 4, defaultBindingMode: BindingMode.TwoWay);
+    /// <summary>The map layer; unset follows the layer chosen on the Map page (so small maps match the main map).</summary>
     public static readonly StyledProperty<string?> LayerIdProperty =
-        AvaloniaProperty.Register<MapControl, string?>(nameof(LayerId), "Standard");
+        AvaloniaProperty.Register<MapControl, string?>(nameof(LayerId));
     public static readonly StyledProperty<IEnumerable?> MarkersProperty =
         AvaloniaProperty.Register<MapControl, IEnumerable?>(nameof(Markers));
     public static readonly StyledProperty<IEnumerable?> LinesProperty =
@@ -60,6 +62,14 @@ public sealed class MapControl : Control
         AvaloniaProperty.Register<MapControl, bool>(nameof(ShowAttribution), true);
     public static readonly StyledProperty<bool> MetricProperty =
         AvaloniaProperty.Register<MapControl, bool>(nameof(Metric), true);
+    /// <summary>Shows the area an offline download saves: a frame inset by <see cref="SelectionInset"/>, the rest dimmed.</summary>
+    public static readonly StyledProperty<bool> ShowSelectionProperty =
+        AvaloniaProperty.Register<MapControl, bool>(nameof(ShowSelection));
+    public static readonly StyledProperty<Thickness> SelectionInsetProperty =
+        AvaloniaProperty.Register<MapControl, Thickness>(nameof(SelectionInset), new Thickness(40));
+    /// <summary>A geographic area to outline (the area of a download in progress); null for none.</summary>
+    public static readonly StyledProperty<GeoBounds?> HighlightAreaProperty =
+        AvaloniaProperty.Register<MapControl, GeoBounds?>(nameof(HighlightArea));
 
     public double CenterLatitude { get => GetValue(CenterLatitudeProperty); set => SetValue(CenterLatitudeProperty, value); }
     public double CenterLongitude { get => GetValue(CenterLongitudeProperty); set => SetValue(CenterLongitudeProperty, value); }
@@ -72,6 +82,9 @@ public sealed class MapControl : Control
     public bool ShowLabels { get => GetValue(ShowLabelsProperty); set => SetValue(ShowLabelsProperty, value); }
     public bool ShowAttribution { get => GetValue(ShowAttributionProperty); set => SetValue(ShowAttributionProperty, value); }
     public bool Metric { get => GetValue(MetricProperty); set => SetValue(MetricProperty, value); }
+    public bool ShowSelection { get => GetValue(ShowSelectionProperty); set => SetValue(ShowSelectionProperty, value); }
+    public Thickness SelectionInset { get => GetValue(SelectionInsetProperty); set => SetValue(SelectionInsetProperty, value); }
+    public GeoBounds? HighlightArea { get => GetValue(HighlightAreaProperty); set => SetValue(HighlightAreaProperty, value); }
 
     /// <summary>Raised on right-click with the geographic position under the pointer.</summary>
     public event Action<double, double>? MapContextRequested;
@@ -89,7 +102,8 @@ public sealed class MapControl : Control
 
     static MapControl()
     {
-        AffectsRender<MapControl>(CenterLatitudeProperty, CenterLongitudeProperty, ZoomProperty, LayerIdProperty, SelectedMarkerProperty, ShowLabelsProperty, MarkersProperty, LinesProperty);
+        AffectsRender<MapControl>(CenterLatitudeProperty, CenterLongitudeProperty, ZoomProperty, LayerIdProperty, SelectedMarkerProperty, ShowLabelsProperty, MarkersProperty, LinesProperty,
+            ShowSelectionProperty, SelectionInsetProperty, HighlightAreaProperty);
         ClipToBoundsProperty.OverrideDefaultValue<MapControl>(true);
         FocusableProperty.OverrideDefaultValue<MapControl>(true);
     }
@@ -127,7 +141,7 @@ public sealed class MapControl : Control
 
     private void OnCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e) => InvalidateVisual();
 
-    private MapLayerInfo LayerInfo => TileService.Layer(LayerId);
+    private MapLayerInfo LayerInfo => TileService.Layer(LayerId ?? ViewModels.AppHost.Core?.Settings.Current.MapLayer);
 
     private double ClampZoom(double z) => Math.Clamp(z, 1, LayerInfo.MaxZoom);
 
@@ -146,12 +160,40 @@ public sealed class MapControl : Control
         return MapMath.FromPixel(cx + p.X - Bounds.Width / 2, cy + p.Y - Bounds.Height / 2, Zoom);
     }
 
-    /// <summary>The visible geographic bounds (north, south, west, east).</summary>
+    /// <summary>The visible geographic bounds (north, south, west, east); west/east may run past ±180 when the view wraps.</summary>
     public (double North, double South, double West, double East) VisibleBounds()
     {
         var (n, w) = FromScreen(new Point(0, 0));
         var (s, e) = FromScreen(new Point(Bounds.Width, Bounds.Height));
         return (n, s, w, e);
+    }
+
+    /// <summary>The screen rectangle of the offline-download frame (the insets shrink on a small map).</summary>
+    public Rect SelectionRect()
+    {
+        const double minSide = 120;
+        var inset = SelectionInset;
+        double Fit(double total, double a, double b, out double scaledA)
+        {
+            // Keep at least minSide (or what there is) between the insets.
+            var room = total - minSide;
+            var sum = a + b;
+            var k = sum <= 0 || sum <= room ? 1 : Math.Max(0, room) / sum;
+            scaledA = a * k;
+            return b * k;
+        }
+        var right = Fit(Bounds.Width, inset.Left, inset.Right, out var left);
+        var bottom = Fit(Bounds.Height, inset.Top, inset.Bottom, out var top);
+        return new Rect(left, top, Math.Max(1, Bounds.Width - left - right), Math.Max(1, Bounds.Height - top - bottom));
+    }
+
+    /// <summary>The geographic area inside the offline-download frame (exactly what a download saves).</summary>
+    public GeoBounds SelectionBounds()
+    {
+        var r = SelectionRect();
+        var (n, w) = FromScreen(r.TopLeft);
+        var (s, e) = FromScreen(r.BottomRight);
+        return GeoBounds.FromView(n, s, w, e);
     }
 
     public void ZoomBy(double delta, Point? around = null)
@@ -181,8 +223,9 @@ public sealed class MapControl : Control
         var w = Bounds.Width;
         var h = Bounds.Height;
         if (w <= 0 || h <= 0) return;
-        var dark = ActualThemeVariant == Avalonia.Styling.ThemeVariant.Dark;
         var layer = LayerInfo;
+        // Overlays follow the basemap: dark labels on the dark map whatever the app's theme.
+        var dark = layer.IsDark || ActualThemeVariant == Avalonia.Styling.ThemeVariant.Dark;
         var background = layer.Background is { } lb ? Color.Parse(lb) : dark ? Color.Parse("#1C1F24") : Color.Parse("#E8EAED");
         ctx.FillRectangle(new SolidColorBrush(background), new Rect(0, 0, w, h));
 
@@ -221,7 +264,9 @@ public sealed class MapControl : Control
         }
 
         DrawLines(ctx);
+        DrawHighlightArea(ctx);
         DrawMarkers(ctx, dark);
+        if (ShowSelection) DrawSelection(ctx, w, h);
         if (ShowAttribution) DrawOverlayText(ctx, layer, w, h, dark);
     }
 
@@ -244,6 +289,33 @@ public sealed class MapControl : Control
             ctx.DrawGeometry(null, halo, geo);
             ctx.DrawGeometry(null, pen, geo);
         }
+    }
+
+    private static IBrush AccentBrush => Application.Current?.TryGetResource("App.Accent", null, out var r) == true && r is IBrush b ? b : new SolidColorBrush(Color.Parse("#2463EB"));
+
+    private void DrawSelection(DrawingContext ctx, double w, double h)
+    {
+        var r = SelectionRect();
+        var dim = new SolidColorBrush(Colors.Black, 0.28);
+        ctx.FillRectangle(dim, new Rect(0, 0, w, r.Top));
+        ctx.FillRectangle(dim, new Rect(0, r.Bottom, w, Math.Max(0, h - r.Bottom)));
+        ctx.FillRectangle(dim, new Rect(0, r.Top, r.Left, r.Height));
+        ctx.FillRectangle(dim, new Rect(r.Right, r.Top, Math.Max(0, w - r.Right), r.Height));
+        ctx.DrawRectangle(null, new Pen(Brushes.White, 4), r, 8, 8);
+        ctx.DrawRectangle(null, new Pen(AccentBrush, 2), r, 8, 8);
+    }
+
+    private void DrawHighlightArea(DrawingContext ctx)
+    {
+        if (HighlightArea is not { } a) return;
+        var tl = ToScreen(a.North, a.West);
+        var br = ToScreen(a.South, a.West + a.LongitudeSpan);
+        // The copy of the area nearest the view centre.
+        var worldPx = MapMath.TileSize * Math.Pow(2, Zoom);
+        var shift = Math.Round((Bounds.Width / 2 - (tl.X + br.X) / 2) / worldPx) * worldPx;
+        var rect = new Rect(new Point(tl.X + shift, tl.Y), new Point(br.X + shift, br.Y));
+        ctx.FillRectangle(new SolidColorBrush(Color.Parse("#2463EB"), 0.10), rect);
+        ctx.DrawRectangle(null, new Pen(AccentBrush, 2, new DashStyle([4, 3], 0)), rect, 4, 4);
     }
 
     private Geometry? Icon(string key)

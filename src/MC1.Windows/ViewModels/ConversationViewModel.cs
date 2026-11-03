@@ -27,6 +27,7 @@ public sealed partial class ConversationViewModel : ViewModelBase
         Kind = kind;
         _main = main;
         _reload = new Debouncer(TimeSpan.FromMilliseconds(60), LoadMessages);
+        _draftSave = new Debouncer(TimeSpan.FromMilliseconds(500), SaveDraft);
     }
 
     public static ConversationViewModel? Create(string key, MainWindowViewModel main)
@@ -72,6 +73,10 @@ public sealed partial class ConversationViewModel : ViewModelBase
     [ObservableProperty] private string? _banner;
     [ObservableProperty] private bool _isRoomSignedIn;
     [ObservableProperty] private bool _isEmpty;
+    /// <summary>Pinned at the top of the chat list (this PC only).</summary>
+    [ObservableProperty] private bool _isPinned;
+    /// <summary>Marked unread while on screen: it stays unread until the chat is opened again.</summary>
+    [ObservableProperty] private bool _isMarkedUnread;
 
     public bool IsDirect => Kind == ConversationKind.Direct;
     public bool IsChannel => Kind == ConversationKind.Channel;
@@ -100,7 +105,8 @@ public sealed partial class ConversationViewModel : ViewModelBase
         _handler = OnDataChanged;
         Core.DataChanged += _handler;
         ChatThemes.Changed += OnThemesChanged;
-        Track(_unhook ??= Unhook);
+        // Also when the UI is rebuilt (language change) without this chat being closed: keep what was typed.
+        Track(_unhook ??= () => { SaveDraft(); Unhook(); });
         SetOpen(visible);
         foreach (var e in Core.Settings.Current.RecentEmoji.Take(6)) QuickEmoji.Add(e);
     }
@@ -108,6 +114,9 @@ public sealed partial class ConversationViewModel : ViewModelBase
     public void Deactivate()
     {
         SaveDraft();
+        // A later debounced save from this (closed) chat must not overwrite what a newer view of it saves.
+        _retired = true;
+        _unreadHeld = false;
         _active = false;
         Unhook();
         if (_unhook is not null) Untrack(_unhook);
@@ -124,10 +133,34 @@ public sealed partial class ConversationViewModel : ViewModelBase
 
     public void SetOpen(bool open)
     {
-        Core.Messages.SetConversationOpen(Key, open && _active);
+        _open = open;
+        // A chat marked unread while on screen doesn't count as seen until it is opened again.
+        Core.Messages.SetConversationOpen(Key, open && _active && !_unreadHeld);
         // Coming back to the chat (window restored, page shown): place the "New messages" line above what arrived
         // meanwhile, then count it as read.
-        if (open && _active && Core.Messages.UnreadCount(Key) > 0) LoadMessages();
+        if (open && _active && !_unreadHeld && Core.Messages.UnreadCount(Key) > 0) LoadMessages();
+    }
+
+    private bool _open;
+    private bool _unreadHeld;
+    private bool _retired;
+
+    /// <summary>The user marked this chat unread while it is on screen: keep it unread (new messages count too).</summary>
+    public void HoldUnread()
+    {
+        if (!_active) return;
+        _unreadHeld = true;
+        IsMarkedUnread = true;
+        Core.Messages.SetConversationOpen(Key, false);
+    }
+
+    /// <summary>The chat was opened again (its row clicked, a message sent): it counts as read from now on.</summary>
+    public void ReleaseUnreadHold()
+    {
+        if (!_unreadHeld) return;
+        _unreadHeld = false;
+        IsMarkedUnread = false;
+        SetOpen(_open);
     }
 
     /// <summary>Id of the first message the user hadn't seen when the chat was opened / came back into view.</summary>
@@ -136,8 +169,8 @@ public sealed partial class ConversationViewModel : ViewModelBase
     /// <summary>Raised when a new "New messages" line was placed (the view scrolls to it).</summary>
     public event Action? DividerPlaced;
 
-    /// <summary>True while this chat is on screen with the window in front.</summary>
-    private bool IsViewing => _active && Core.Messages.IsConversationOpen(Key);
+    /// <summary>True while this chat is on screen with the window in front (and not marked unread meanwhile).</summary>
+    private bool IsViewing => _active && !_unreadHeld && Core.Messages.IsConversationOpen(Key);
 
     [ObservableProperty] private bool _hasNewDivider;
 
@@ -166,7 +199,12 @@ public sealed partial class ConversationViewModel : ViewModelBase
                 break;
             case DataKind.Conversations:
                 // E.g. the radio's message backlog finished syncing: unread messages here get their "New messages" line.
-                Ui(() => { if (_active && Core.Messages.UnreadCount(Key) > 0) _reload.Trigger(); });
+                Ui(() =>
+                {
+                    if (!_active) return;
+                    IsPinned = Core.Messages.IsPinned(Key);
+                    if (!_unreadHeld && Core.Messages.UnreadCount(Key) > 0) _reload.Trigger();
+                });
                 break;
         }
     }
@@ -219,6 +257,12 @@ public sealed partial class ConversationViewModel : ViewModelBase
                 Banner = !Room.IsConnected ? L.T("You're not signed in to this room. Sign in to receive new posts.") : !Room.CanPost ? L.T("You have read-only access.") : null;
                 break;
         }
+        IsPinned = Kind switch
+        {
+            ConversationKind.Direct => Contact!.IsPinned,
+            ConversationKind.Channel => Channel!.IsPinned,
+            _ => Room!.IsPinned,
+        };
         UpdateCounter();
     }
 
@@ -260,7 +304,7 @@ public sealed partial class ConversationViewModel : ViewModelBase
             lastTime = i.Time;
         }
         // "New messages" line: above the oldest of the last `unread` received messages (like the iPhone app).
-        if (unread > 0 && _active)
+        if (unread > 0 && _active && !_unreadHeld)
         {
             // The unread ones are the most recently *received* messages; messages the radio kept while the app was
             // closed are sorted by when they were sent, so they may sit above older ones. The line goes above the
@@ -296,6 +340,15 @@ public sealed partial class ConversationViewModel : ViewModelBase
 
     private bool Merge(List<MessageItemViewModel> items)
     {
+        // Messages deleted: take their bubbles out and keep the rest (and the scroll position) as they are.
+        if (items.Count < Messages.Count && items.Count > 0 && IsSubsequence(items, Messages))
+        {
+            var keep = items.Select(i => i.Id).ToHashSet();
+            for (var k = Messages.Count - 1; k >= 0; k--)
+                if (!keep.Contains(Messages[k].Id)) Messages.RemoveAt(k);
+            for (var k = 0; k < Messages.Count; k++) Messages[k].UpdateFrom(items[k]);
+            return false;
+        }
         // A busy chat (more messages than one page): each new message moves the page of newest messages on by one, so
         // the page starts further down the list on screen. Keep the bubbles already shown (the older ones stay
         // visible) and just add the new ones — rebuilding them all made new messages take a couple of seconds to appear.
@@ -328,6 +381,14 @@ public sealed partial class ConversationViewModel : ViewModelBase
         return appended;
     }
 
+    private static bool IsSubsequence(List<MessageItemViewModel> items, IList<MessageItemViewModel> shown)
+    {
+        var j = 0;
+        for (var k = 0; k < shown.Count && j < items.Count; k++)
+            if (shown[k].Id == items[j].Id) j++;
+        return j == items.Count;
+    }
+
     [RelayCommand]
     private void LoadOlder()
     {
@@ -342,6 +403,8 @@ public sealed partial class ConversationViewModel : ViewModelBase
     {
         UpdateCounter();
         UpdateMentions();
+        // Kept as it's typed (like the iPhone app), so it survives leaving the chat, a lost connection or a crash.
+        if (!_loadingDraft) _draftSave.Trigger();
     }
 
     private void UpdateCounter()
@@ -403,6 +466,7 @@ public sealed partial class ConversationViewModel : ViewModelBase
             ReplyingTo = null;
             SaveDraft();
             ClearDivider();
+            ReleaseUnreadHold();
             // It's saved already: show it right away rather than after the change notification's short delay.
             LoadMessages();
             await Task.CompletedTask;
@@ -418,21 +482,41 @@ public sealed partial class ConversationViewModel : ViewModelBase
     [RelayCommand]
     private Task OpenLink(LinkDetector.Token token) => HandleLinkAsync(token);
 
+    private readonly Debouncer _draftSave;
+    private bool _loadingDraft;
+    /// <summary>What is stored for this chat (compared with the text, not with a record read when the chat opened).</summary>
+    private string? _savedDraft;
+
     private void LoadDraft()
     {
-        Draft = Kind switch
+        _savedDraft = Kind switch
         {
-            ConversationKind.Direct => Contact?.DraftText ?? "",
-            ConversationKind.Channel => Channel?.DraftText ?? "",
-            _ => "",
+            ConversationKind.Direct => Contact?.DraftText,
+            ConversationKind.Channel => Channel?.DraftText,
+            _ => Room?.DraftText,
         };
+        _loadingDraft = true;
+        try { Draft = _savedDraft ?? ""; }
+        finally { _loadingDraft = false; }
     }
 
-    private void SaveDraft()
+    /// <summary>Stores the unsent text (an empty box clears it). Does nothing once this chat was closed.</summary>
+    public void SaveDraft()
     {
+        if (_retired) return;
         var d = string.IsNullOrWhiteSpace(Draft) ? null : Draft;
-        if (Kind == ConversationKind.Direct && Contact is not null && Contact.DraftText != d) Core.Db.SetContactDraft(Contact.Id, d);
-        if (Kind == ConversationKind.Channel && Channel is not null && Core.RadioId is { } rid && Channel.DraftText != d) Core.Db.SetChannelDraft(rid, Channel.Idx, d);
+        if (d == _savedDraft) return;
+        switch (Kind)
+        {
+            case ConversationKind.Direct when Contact is not null: Core.Db.SetContactDraft(Contact.Id, d); break;
+            case ConversationKind.Channel when Channel is not null: Core.Db.SetChannelDraft(Channel.RadioId, Channel.Idx, d); break;
+            case ConversationKind.Room when Room is not null: Core.Rooms.SaveDraft(Room, d); break;
+            default: return;
+        }
+        var listed = (_savedDraft is null) != (d is null);
+        _savedDraft = d;
+        // A DM with only a draft is listed in Chats (and leaves the list when the draft is cleared).
+        if (listed) Core.Notify(DataKind.Conversations);
     }
 
     // MARK: Message actions
@@ -473,7 +557,36 @@ public sealed partial class ConversationViewModel : ViewModelBase
     private async Task Delete(MessageItemViewModel m)
     {
         if (m.Record is { } rec && await AppHost.Dialogs.Confirm(L.T("Delete message?"), L.T("This removes the message from this PC only."), L.T("Delete"), true))
+        {
+            // One fewer loaded: the next load keeps the same messages (it doesn't pull an older one in and redraw).
+            if (Messages.Any(x => x.Id == rec.Id)) _limit = Math.Max(1, _limit - 1);
             Core.Messages.DeleteMessage(rec);
+        }
+    }
+
+    // MARK: Chat actions (pin, read state)
+
+    [RelayCommand]
+    private async Task TogglePin()
+    {
+        var pinned = Core.Messages.IsPinned(Key);
+        await Guard(() => { Core.Messages.SetPinned(Key, !pinned); return Task.CompletedTask; });
+        IsPinned = Core.Messages.IsPinned(Key);
+    }
+
+    /// <summary>"Mark as unread" from the chat's menu: it stays unread (and counts in the totals) until opened again.</summary>
+    [RelayCommand]
+    private async Task MarkUnread()
+    {
+        await Guard(() => { Core.Messages.SetReadState(Key, false); return Task.CompletedTask; });
+        HoldUnread();
+    }
+
+    [RelayCommand]
+    private void MarkRead()
+    {
+        ReleaseUnreadHold();
+        Core.Messages.MarkRead(Key);
     }
 
     [RelayCommand]

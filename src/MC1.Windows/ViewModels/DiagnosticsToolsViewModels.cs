@@ -22,7 +22,7 @@ public sealed class RxLogRow
         Hops = r.PathLength == 0xFF ? "–" : r.HopCount.ToString();
         Snr = r.Snr is { } s ? $"{s:0.#}" : "–";
         Rssi = r.Rssi is { } rs ? rs.ToString() : "–";
-        Region = r.RegionScope;
+        Region = r.RegionScope ?? (IsUnscoped(r.TransportCode) ? L.T("Unscoped") : null);
         Summary = r.Payload switch
         {
             PayloadType.GroupText when r.Decrypt == DecryptStatus.Success => $"[{r.ChannelName}] {r.DecodedText}",
@@ -49,6 +49,12 @@ public sealed class RxLogRow
             _ => "#0EA5E9",
         };
     }
+
+    /// <summary>
+    /// A transport code whose first little-endian UInt16 is 0 was sent unscoped (no region). Shorter codes are not
+    /// unscoped. Reads only what is there, so a short or odd code can't break the log.
+    /// </summary>
+    public static bool IsUnscoped(byte[]? transportCode) => transportCode is { Length: >= 2 } tc && tc[0] == 0 && tc[1] == 0;
 
     public RxLogRecord Record { get; }
     public string Time { get; }
@@ -127,6 +133,7 @@ public sealed partial class RxLogViewModel : ToolPage
             (L.T("Received"), $"{DateTimeOffset.FromUnixTimeMilliseconds(r.ReceivedAt).LocalDateTime:yyyy-MM-dd HH:mm:ss.fff}"),
             (L.T("Type"), $"{value.Type} (v{r.PayloadVersion})"),
             (L.T("Route"), r.RegionScope is { } rg ? L.F("{0} · region {1}", value.Route, rg)
+                : RxLogRow.IsUnscoped(r.TransportCode) ? L.F("{0} · region {1}", value.Route, L.T("Unscoped"))
                 : r.TransportCode is { Length: > 0 } tc ? L.F("{0} · transport {1}", value.Route, Convert.ToHexString(tc)) : value.Route),
             (L.T("Signal"), $"SNR {value.Snr} dB · RSSI {value.Rssi} dBm"),
         };
@@ -349,36 +356,53 @@ public sealed partial class NodeDiscoveryViewModel : ToolPage
     private readonly MainWindowViewModel _main;
     private CancellationTokenSource? _cts;
 
-    public NodeDiscoveryViewModel(MainWindowViewModel main) => _main = main;
+    public NodeDiscoveryViewModel(MainWindowViewModel main)
+    {
+        _main = main;
+        Results.CollectionChanged += (_, _) => OnPropertyChanged(nameof(ShowHiddenRepeatersNote));
+        // A scan keeps listening while the user is on another page; only rebuilding the UI retires this one.
+        Track(() => _cts?.Cancel());
+    }
 
     public ObservableCollection<DiscoveredNeighbourRow> Results { get; } = new();
 
-    [ObservableProperty] private bool _includeRepeaters = true;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(ShowHiddenRepeatersNote))] private bool _includeRepeaters = true;
     [ObservableProperty] private bool _includeRooms = true;
     [ObservableProperty] private bool _includeSensors = true;
     [ObservableProperty] private int _listenSeconds = 10;
-    [ObservableProperty] private bool _isScanning;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(ShowHiddenRepeatersNote))] private bool _isScanning;
     [ObservableProperty] private string? _status;
     [ObservableProperty] private double _progress;
+
+    /// <summary>Why a repeater may not answer, shown with the scan prompt and after a scan nobody answered (as on the iPhone).</summary>
+    public string HiddenRepeatersNote => L.T("Repeaters with both advert intervals set to 0 don't respond to the discovery ping.");
+
+    public bool ShowHiddenRepeatersNote => IncludeRepeaters && !IsScanning && Results.Count == 0;
+
+    /// <summary>Replies are only added to the scan they answered.</summary>
+    private int _scanGeneration;
 
     [RelayCommand]
     private async Task Scan()
     {
         if (!Core.IsConnected) { Status = L.T("Connect to your radio first."); return; }
         if (!IncludeRepeaters && !IncludeRooms && !IncludeSensors) { Status = L.T("Pick at least one node type."); return; }
-        _cts = new CancellationTokenSource();
+        var cts = new CancellationTokenSource();
+        _cts = cts;
+        var generation = ++_scanGeneration;
         Results.Clear();
         IsScanning = true;
         Status = L.T("Listening for replies…");
         Progress = 0;
         var started = DateTime.UtcNow;
+        var listen = ListenSeconds;
         var timer = new Avalonia.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
-        timer.Tick += (_, _) => Progress = Math.Min(100, (DateTime.UtcNow - started).TotalSeconds / ListenSeconds * 100);
+        timer.Tick += (_, _) => Progress = Math.Min(100, (DateTime.UtcNow - started).TotalSeconds / listen * 100);
         timer.Start();
         try
         {
-            var found = await Core.Tools.DiscoverNodesAsync(IncludeRepeaters, IncludeRooms, IncludeSensors, TimeSpan.FromSeconds(ListenSeconds),
-                n => Ui(() => Results.Add(new DiscoveredNeighbourRow { Node = n })), _cts.Token);
+            var found = await Core.Tools.DiscoverNodesAsync(IncludeRepeaters, IncludeRooms, IncludeSensors, TimeSpan.FromSeconds(listen),
+                n => Ui(() => { if (generation == _scanGeneration) Results.Add(new DiscoveredNeighbourRow { Node = n }); }), cts.Token);
             Status = found.Count == 0 ? L.T("No nodes replied. Discovery only reaches nodes in direct radio range (zero hop).") : L.Plural(found.Count, "{0} node replied.", "{0} nodes replied.");
         }
         catch (Exception ex) { Status = L.F("Discovery failed: {0}", ex.Message); }

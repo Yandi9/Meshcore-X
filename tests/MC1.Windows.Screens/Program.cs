@@ -294,6 +294,44 @@ if (Environment.GetEnvironmentVariable("MC1_THEMES") is not null)
     }
 }
 Shot("01-chats-list");
+// Pinned chats under their own heading, and a chat's right-click menu (read state, mute, pin, … delete last).
+if (only is null || only.Contains("01b-chats-pinned") || only.Contains("01c-chats-menu"))
+{
+    var pinned = vm.Chats.Conversations.LastOrDefault(c => c.Kind == ChatFilter.Channels) ?? vm.Chats.Conversations.LastOrDefault();
+    if (pinned is not null)
+    {
+        core.Messages.SetPinned(pinned.Key, true);
+        vm.Chats.Reload();
+        Shot("01b-chats-pinned");
+        var row = win.GetVisualDescendants().OfType<ListBoxItem>().FirstOrDefault(i => i.DataContext is ConversationListItem { IsPinned: true });
+        var owner = row?.GetVisualDescendants().OfType<Control>().FirstOrDefault(g => g.ContextMenu is not null);
+        var menu = owner?.ContextMenu;
+        if (owner is not null && menu is not null && (only is null || only.Contains("01c-chats-menu")))
+        {
+            // Headless there's no mouse position: show it under the row, as a right-click there would.
+            var placement = menu.Placement;
+            menu.Placement = PlacementMode.BottomEdgeAlignedLeft;
+            for (var attempt = 0; attempt < 5 && !menu.IsOpen; attempt++)
+            {
+                Pump(300);
+                menu.Open(owner);
+            }
+            Pump(500);
+            menu.Placement = placement;
+            if (TopLevel.GetTopLevel(menu) is { } popup && !ReferenceEquals(popup, win))
+            {
+                popup.CaptureRenderedFrame()?.Save(Path.Combine(outDir, $"01c-chats-menu-{theme.ToLowerInvariant()}.png"));
+                Console.WriteLine("saved popup 01c-chats-menu");
+            }
+            else Shot("01c-chats-menu");
+            Console.WriteLine($"chat menu: {string.Join(" | ", menu.Items.OfType<MenuItem>().Where(i => i.IsVisible).Select(i => i.Header))}");
+            menu.Close();
+        }
+        core.Messages.SetPinned(pinned.Key, false);
+        vm.Chats.Reload();
+        Pump(200);
+    }
+}
 var first = vm.Chats.Conversations.FirstOrDefault(c => c.Kind == ChatFilter.Channels) ?? vm.Chats.Conversations.FirstOrDefault();
 if (first is not null) vm.Chats.Selected = first;
 Pump(800);
@@ -445,6 +483,13 @@ if (core.Contacts.GetAll().FirstOrDefault(c => c.ContactType == MeshCore.Contact
 Shot("06-map");
 vm.Map.ShowPath([core.Contacts.GetAll().First(c => c.ContactType == MeshCore.ContactType.Repeater).PublicKey[..1]]);
 Shot("06b-map-path");
+// Advanced filters shown as chips over the map, then the offline-download frame.
+vm.Map.Filter = new MC1.Core.Maps.MapAdvancedFilter { LastHeard = MC1.Core.Maps.MapLastHeardRange.Within(new(2, MC1.Core.Maps.MapDurationUnit.Hours)), Hops = MC1.Core.Maps.MapHopRange.Create(0, 1) };
+Shot("06g-map-filters");
+vm.Map.Filter = new MC1.Core.Maps.MapAdvancedFilter();
+vm.Map.ToggleDownloadPanelCommand.Execute(null);
+Shot("06h-map-offline");
+vm.Map.ToggleDownloadPanelCommand.Execute(null);
 if (Environment.GetEnvironmentVariable("MC1_MVT_SEED") is not null)
 {
     vm.Map.LayerId = "Dark";
@@ -653,6 +698,95 @@ if (vm.Chats.Conversations.FirstOrDefault(c => c.Kind == ChatFilter.Channels) is
 DialogShot("26-restore-backup", new ConfigTransferViewModel(Mc1Backup.Read(Mc1Backup.Export(core, "1.0.0", out _)), Mc1Backup.DefaultFileName(DateTime.Now)), 540, 640);
 DialogShot("27-log", new LogViewerViewModel(), 900, 640);
 DialogShot("28-chat-appearance", new ChatAppearanceViewModel("ch:0", "Appearance · Public"), 860, 700);
+// Firmware 1.18 (WS2): radio WiFi, links, remote CLI grants, power off, remote commands to a contact's radio.
+if (only is null || only.Any(o => o.StartsWith("13c") || o.StartsWith("13d") || o.StartsWith("20b") || o.StartsWith("29") || o.StartsWith("14j")))
+{
+    // The demo radio over a (simulated) Bluetooth link whose WiFi joins a network after a reboot.
+    var bleSim = new MC1.Core.Simulation.SimulatedRadio(chatter: false);
+    core.BluetoothTransportFactory = _ => bleSim;
+    Await(core.ConnectAsync(new ConnectionTarget(ConnectionKind.Bluetooth, "C0FFEE123456", "Demo Radio")));
+    Await(core.Device.SetRadioWifiCredentialsAsync("Home Net", "secret"));
+    Await(core.Device.SetRadioWifiEnabledAsync(true));
+    vm.Navigate(Page.Radio);
+    Pump(1500);
+    win.GetVisualDescendants().OfType<RadioDeviceSectionsView>().FirstOrDefault()?.BringIntoView();
+    Shot("13c-radio-wifi-reboot-pending");
+    Await(core.Device.RebootAsync());
+    var until = DateTime.UtcNow.AddSeconds(25);
+    Pump(500);
+    while (!core.IsReady && DateTime.UtcNow < until) Pump(200);
+    vm.Radio.OnShown();
+    Pump(2500);
+    win.GetVisualDescendants().OfType<RadioDeviceSectionsView>().FirstOrDefault()?.BringIntoView();
+    Shot("13d-radio-links");
+    Console.WriteLine($"links: {string.Join(" | ", vm.Radio.Sections.Links.Rows.Select(r => $"{r.Title} live={r.IsLive} switch={r.Row.CanSwitch} {r.Subtitle}"))}");
+    vm.Navigate(Page.Settings);
+    vm.Settings.ShowCategory("general");
+    Pump(1200);
+    win.GetVisualDescendants().OfType<RadioLinksView>().FirstOrDefault(v => v.IsEffectivelyVisible)?.BringIntoView();
+    Shot("14j-settings-links");
+    var alice = core.Contacts.GetAll().First(c => c.Name == "Alice");
+    vm.Navigate(Page.Contacts);
+    vm.Contacts.Select(alice.Id);
+    Pump(800);
+    Shot("29d-contact-remote-commands");
+    var console = new RemoteCliConsoleViewModel(alice);
+    foreach (var cmd in new[] { "get name", "ver" })
+    {
+        console.Input = cmd;
+        console.SubmitCommand.Execute(null);
+        var t = DateTime.UtcNow.AddSeconds(10);
+        while ((console.IsBusy || console.Lines.Count == 0) && DateTime.UtcNow < t) Pump(100);
+    }
+    console.Input = "get wifi.";
+    DialogShot("29-remote-commands", console, 760, 560);
+    DialogShot("29b-remote-cli-contacts", new RemoteCliContactsViewModel(), 480, 620);
+    DialogShot("29c-radio-wifi-edit", new RadioWifiEditViewModel("Home Net", false), 460, 420);
+    // A radio with both links saved: the Connect dialog offers the other one; pairing help after repeated failures.
+    if (core.RadioId is { } rid)
+        core.Settings.Update(s => { if (s.RadioLinks.TryGetValue(rid, out var l)) l.Wifi = RadioLinkRules.WifiTarget("192.168.4.42"); });
+    var cvm = new ConnectViewModel { ShowPairingHelp = true };
+    DialogShot("20b-connect-links", cvm, 560, 720);
+}
+// CoreScope: the link in Settings ▸ General, then its tab (this harness has no browser, so the tab shows its fallback).
+if (only is null || only.Any(o => o.StartsWith("32")))
+{
+    vm.Navigate(Page.Settings);
+    vm.Settings.ShowCategory("general");
+    var link = vm.Settings.CoreScope;
+    link.LinkText = "corescope.example.org";
+    Pump(600);
+    void ShowLinkGroup() => win.GetVisualDescendants().OfType<CoreScopeLinkView>().FirstOrDefault(v => v.IsEffectivelyVisible)?.BringIntoView();
+    ShowLinkGroup();
+    Console.WriteLine($"nav before: {string.Join(",", vm.NavItems.Select(n => n.Label))}");
+    Shot("32-settings-corescope");
+    link.LinkCommand.Execute(null);
+    var checkUntil = DateTime.UtcNow.AddSeconds(20);
+    Pump(300);
+    while (link.IsChecking && DateTime.UtcNow < checkUntil) Pump(200);
+    Pump(400);
+    ShowLinkGroup();
+    Console.WriteLine($"nav after: {string.Join(",", vm.NavItems.Select(n => n.Label))} url={core.Settings.Current.CoreScopeUrl} status=[{link.Status}]");
+    Shot("32b-settings-corescope-linked");
+    core.Settings.Update(s => s.CoreScopeName = "Example State Mesh");
+    vm.Navigate(Page.CoreScope);
+    Pump(800);
+    Console.WriteLine($"page={vm.CurrentPage?.GetType().Name} shown={vm.CoreScope?.IsShown} heading=[{vm.CoreScope?.Heading}]");
+    Shot("32c-corescope-tab");
+    if (vm.CoreScope is { } cs)
+    {
+        cs.BrowserUnavailable = null;
+        cs.OnNavigationCompleted(false, "the address wasn't found");
+        Shot("32d-corescope-error");
+    }
+    vm.Navigate(Page.Map);
+    Pump(300);
+    Console.WriteLine($"after leaving: shown={vm.CoreScope?.IsShown} kept={vm.CoreScopePage is not null}");
+    vm.Navigate(Page.CoreScope);
+    MC1.Core.Utilities.CoreScopeSettings.Unlink(core.Settings);
+    Pump(500);
+    Console.WriteLine($"nav removed: {string.Join(",", vm.NavItems.Select(n => n.Label))} page={vm.CurrentPage?.GetType().Name} kept={vm.CoreScopePage is not null}");
+}
 vm.Settings.OnShown();
 
 foreach (var (text, a, b, ins) in new[] { ("Hello world", 5, 5, "https://meshpic.org/Ab3x"), ("Look:", 5, 5, "https://meshpic.org/Ab3x"), ("", 0, 0, "😀"), ("ab", 1, 1, "😀"), ("replace ME please", 8, 10, "https://meshpic.org/q1w2") })

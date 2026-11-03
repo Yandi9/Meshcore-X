@@ -31,6 +31,8 @@ public abstract record MeshEvent
     public sealed record StatsPackets(PacketStats Stats) : MeshEvent;
     public sealed record AutoAddConfigEvent(AutoAddConfig Config) : MeshEvent;
     public sealed record DefaultFloodScopeEvent(DefaultFloodScope? Scope) : MeshEvent;
+    /// <summary>UTF-8 reply to <see cref="MeshCoreSession.RunCliCommandAsync"/> (<see cref="ResponseCode.CliReply"/>). Firmware v14+.</summary>
+    public sealed record CliReply(string Text) : MeshEvent;
     public sealed record AllowedRepeatFreq(IReadOnlyList<FrequencyRange> Ranges) : MeshEvent;
     public sealed record ContactsStart(int Count) : MeshEvent;
     public sealed record Contact(MeshContact Value) : MeshEvent;

@@ -81,6 +81,12 @@ public sealed class WebView2Host : NativeControlHost
             Math.Max(1, (int)Math.Round(Bounds.Width * scale)), Math.Max(1, (int)Math.Round(Bounds.Height * scale)));
     }
 
+    /// <summary>Hides the page without closing it (hidden pages are throttled by the browser).</summary>
+    public void SetBrowserVisible(bool visible)
+    {
+        try { if (_controller is not null) _controller.IsVisible = visible; } catch { /* closing */ }
+    }
+
     public void FocusBrowser()
     {
         try { _controller?.MoveFocus(CoreWebView2MoveFocusReason.Programmatic); } catch { /* not ready */ }

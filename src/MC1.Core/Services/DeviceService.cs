@@ -4,7 +4,7 @@ using MeshCore;
 namespace MC1.Core.Services;
 
 /// <summary>Companion radio configuration (identity, position, radio, telemetry policy, security).</summary>
-public sealed class DeviceService(MeshApp app)
+public sealed partial class DeviceService(MeshApp app)
 {
     private MeshCoreSession S => app.RequireSession();
 
@@ -89,7 +89,8 @@ public sealed class DeviceService(MeshApp app)
     {
         if (app.SelfInfo is not { } s) return null;
         var preferred = app.RadioId is { } id && app.Settings.Current.AppliedRadioPresets.TryGetValue(id, out var p) ? p : null;
-        return RadioPresets.Resolve(s.RadioFrequency, s.RadioBandwidth, s.RadioSpreadingFactor, s.RadioCodingRate, preferred);
+        var area = RegionalAreas.Selection(app.Settings.Current.PresetCountry, app.Settings.Current.PresetArea);
+        return RadioPresets.Resolve(s.RadioFrequency, s.RadioBandwidth, s.RadioSpreadingFactor, s.RadioCodingRate, preferred, area?.CountryCode, area?.AdministrativeAreaCode);
     }
 
     /// <summary>Reads the radio's settings again (name, position, radio, power, repeat mode…) so the app shows exactly what it has.</summary>

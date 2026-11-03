@@ -83,8 +83,12 @@ public abstract class StreamTransportBase : IMeshTransport
     public virtual bool SupportsPipelinedReads => true;
     public ChannelReader<byte[]> Received => _channel.Reader;
 
-    /// <summary>Raised on the reader thread when the link drops unexpectedly.</summary>
+    /// <summary>Raised once when the link drops unexpectedly (reader thread, or the writer when a write finds the link
+    /// dead). The received-frames reader is completed first, so the session's receive loop ends.</summary>
     public event Action<Exception?>? Disconnected;
+
+    /// <summary>When the last unexpected connection loss was observed (Swift passes this time to its disconnection handler).</summary>
+    public DateTimeOffset? DisconnectedAt { get; private set; }
 
     protected abstract Task<Stream> OpenAsync(CancellationToken ct);
     protected abstract void Close();
@@ -94,6 +98,7 @@ public abstract class StreamTransportBase : IMeshTransport
         if (IsConnected) return;
         _channel = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
         Stream = await OpenAsync(ct).ConfigureAwait(false);
+        Interlocked.Exchange(ref _lossReported, 0);
         IsConnected = true;
         _readCts = new CancellationTokenSource();
         var channel = _channel;
@@ -122,11 +127,27 @@ public abstract class StreamTransportBase : IMeshTransport
         catch (Exception ex) { error = ex; }
         finally
         {
-            var wasConnected = IsConnected;
-            IsConnected = false;
-            channel.Writer.TryComplete();
-            if (wasConnected && !ct.IsCancellationRequested) Disconnected?.Invoke(error);
+            if (!ct.IsCancellationRequested) HandleConnectionLost(channel, error);
+            else
+            {
+                IsConnected = false;
+                channel.Writer.TryComplete();
+            }
         }
+    }
+
+    private int _lossReported;
+
+    /// <summary>One teardown and one notification per connection, whether the reader or a failed write sees the loss
+    /// first (port of the Swift WiFi transport's <c>handleReceiveTermination</c>).</summary>
+    private void HandleConnectionLost(Channel<byte[]> channel, Exception? error)
+    {
+        var wasConnected = IsConnected;
+        IsConnected = false;
+        channel.Writer.TryComplete();
+        if (!wasConnected || Interlocked.Exchange(ref _lossReported, 1) != 0) return;
+        DisconnectedAt = DateTimeOffset.UtcNow;
+        Disconnected?.Invoke(error);
     }
 
     public async Task DisconnectAsync()
@@ -160,8 +181,13 @@ public abstract class StreamTransportBase : IMeshTransport
         {
             throw new TransportException("Write timed out");
         }
-        catch (IOException ex)
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or System.Net.Sockets.SocketException)
         {
+            // The link is dead: finish the received stream now so the session sees the loss even if the read is stuck.
+            // Report first (while IsConnected is still true), then stop the reader.
+            HandleConnectionLost(_channel, ex);
+            _readCts?.Cancel();
+            try { Close(); } catch { /* ignore */ }
             throw new TransportException("Write failed: " + ex.Message, ex);
         }
         finally { _writeLock.Release(); }
@@ -177,6 +203,9 @@ public abstract class StreamTransportBase : IMeshTransport
 /// <summary>Companion radio over WiFi (TCP, default port 5000).</summary>
 public sealed class TcpTransport(string host, int port) : StreamTransportBase
 {
+    /// <summary>Companion WiFi TCP port (firmware <c>TCP_PORT</c> default; the radio CLI cannot read it).</summary>
+    public const int DefaultPort = 5000;
+
     private TcpClient? _client;
     public string Host { get; } = host;
     public int Port { get; } = port;
@@ -280,13 +309,53 @@ public sealed class MockTransport : IMeshTransport
         return Task.CompletedTask;
     }
 
-    public Task SendAsync(byte[] payload, CancellationToken ct = default)
+    public async Task SendAsync(byte[] payload, CancellationToken ct = default)
     {
         if (!IsConnected) throw new TransportException("Not connected");
         lock (Sent) Sent.Add(payload);
         if (OnSend is not null)
             foreach (var reply in OnSend(payload)) _channel.Writer.TryWrite(reply);
-        return Task.CompletedTask;
+        TaskCompletionSource? held = null;
+        lock (_holdLock)
+        {
+            if (_parkNextSend)
+            {
+                _parkNextSend = false;
+                held = _held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+        }
+        if (held is not null) await held.Task.ConfigureAwait(false);
+    }
+
+    private readonly object _holdLock = new();
+    private bool _parkNextSend, _failHeldSend;
+    private TaskCompletionSource? _held;
+
+    /// <summary>Parks the next send (after it is recorded in <see cref="Sent"/>) until <see cref="ReleaseHeldSend"/>, so a
+    /// test can inject a reply or a loss before the write returns.</summary>
+    public void HoldNextSend() { lock (_holdLock) _parkNextSend = true; }
+
+    /// <summary>The parked send throws <see cref="TransportException"/> when released.</summary>
+    public void FailHeldSend() { lock (_holdLock) _failHeldSend = true; }
+
+    /// <summary>True while a send is parked by <see cref="HoldNextSend"/>.</summary>
+    public bool SendIsWaiting { get { lock (_holdLock) return _held is not null; } }
+
+    /// <summary>Resumes the parked send (a no-op when nothing is parked).</summary>
+    public void ReleaseHeldSend()
+    {
+        TaskCompletionSource? held;
+        bool fail;
+        lock (_holdLock)
+        {
+            held = _held;
+            _held = null;
+            _parkNextSend = false;
+            fail = _failHeldSend;
+            _failHeldSend = false;
+        }
+        if (fail) held?.TrySetException(new TransportException("simulated send failure"));
+        else held?.TrySetResult();
     }
 
     public void Inject(byte[] frame) => _channel.Writer.TryWrite(frame);

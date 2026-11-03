@@ -1,6 +1,6 @@
-# Installing MeshCore for Windows 1.0.0
+# Installing MeshCore for Windows 1.1.0
 
-1. Choose `MeshCore-1.0.0-win-x64.zip` for Intel/AMD PCs, or `MeshCore-1.0.0-win-arm64.zip` for Windows on ARM.
+1. Choose `MeshCore-1.1.0-win-x64.zip` for Intel/AMD PCs, or `MeshCore-1.1.0-win-arm64.zip` for Windows on ARM.
 2. Extract the entire ZIP to a folder you control.
 3. Open `MeshCore-x64.exe` or `MeshCore-arm64.exe`. The app is self-contained; you do not need the source files or a separate .NET runtime.
 
@@ -20,5 +20,5 @@ The app creates its own settings, contacts, messages and logs under `%APPDATA%\M
 
 When updating, close the app from its tray menu, extract the new ZIP into a separate folder, and run the new executable. Your existing AppData is retained. Back up your data before changing versions. There is no automatic updater.
 
-Source: https://github.com/Yandi9/Meshcore-App-for-Desktop
-Issues: https://github.com/Yandi9/Meshcore-App-for-Desktop/issues
+Source: https://github.com/Yandi9/Meshcore-X
+Issues: https://github.com/Yandi9/Meshcore-X/issues

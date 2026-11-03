@@ -81,6 +81,29 @@
         <TextBlock Classes="section" Text="{l:T 'RADIO'}" />
         <Border Classes="group">
           <StackPanel>
+            <!-- Where the user is, for the preset recommendation (never written to the radio) -->
+            <Grid ColumnDefinitions="200,*,8,*" Classes="setting">
+              <TextBlock Classes="label" Text="{l:T 'Your area'}" />
+              <ComboBox Grid.Column="1" ItemsSource="{Binding Area.Countries}" SelectedItem="{Binding Area.Country}" PlaceholderText="{l:T 'Country'}" HorizontalAlignment="Stretch" VerticalAlignment="Center">
+                <ComboBox.ItemTemplate>
+                  <DataTemplate x:DataType="u:RegionalAreas+Country">
+                    <TextBlock Text="{Binding Name}" />
+                  </DataTemplate>
+                </ComboBox.ItemTemplate>
+              </ComboBox>
+              <ComboBox Grid.Column="3" ItemsSource="{Binding Area.Subdivisions}" SelectedItem="{Binding Area.Subdivision}" PlaceholderText="{Binding Area.SubdivisionPlaceholder}"
+                        IsVisible="{Binding Area.ShowSubdivisions}" HorizontalAlignment="Stretch" VerticalAlignment="Center">
+                <ComboBox.ItemTemplate>
+                  <DataTemplate x:DataType="u:RegionalAreas+Subdivision">
+                    <TextBlock Text="{Binding Name}" />
+                  </DataTemplate>
+                </ComboBox.ItemTemplate>
+              </ComboBox>
+            </Grid>
+            <Grid ColumnDefinitions="200,*,Auto" Margin="0,0,0,4">
+              <TextBlock Grid.Column="1" Text="{Binding Area.RecommendationText}" Classes="caption" TextWrapping="Wrap" VerticalAlignment="Center" />
+              <Button Grid.Column="2" Classes="link" Content="{l:T 'Use this preset'}" Command="{Binding UseRecommendedPresetCommand}" IsVisible="{Binding CanUseRecommended}" Margin="8,0,0,0" />
+            </Grid>
             <Grid ColumnDefinitions="200,*" Classes="setting">
               <TextBlock Classes="label" Text="{l:T 'Preset'}" />
               <ComboBox Grid.Column="1" ItemsSource="{Binding Presets}" SelectedItem="{Binding SelectedPreset}" HorizontalAlignment="Stretch" PlaceholderText="{l:T 'Custom'}" VerticalAlignment="Center">
@@ -143,7 +166,7 @@
               </StackPanel>
               <ToggleSwitch Grid.Column="1" IsChecked="{Binding AutoAddEnabled}" OnContent="" OffContent="" />
             </Grid>
-            <WrapPanel Margin="0,0,0,6" IsEnabled="{Binding AutoAddEnabled}">
+            <WrapPanel Margin="0,0,0,6" IsEnabled="{Binding AutoAddEnabled}" IsVisible="{Binding SupportsAutoAddConfig}">
               <CheckBox Content="{l:T 'Companions'}" IsChecked="{Binding AutoAddContacts}" Margin="0,0,14,0" />
               <CheckBox Content="{l:T 'Repeaters'}" IsChecked="{Binding AutoAddRepeaters}" Margin="0,0,14,0" />
               <CheckBox Content="{l:T 'Rooms'}" IsChecked="{Binding AutoAddRooms}" Margin="0,0,14,0" />
@@ -151,11 +174,11 @@
               <CheckBox Content="{l:T 'Overwrite oldest when full'}" IsChecked="{Binding OverwriteOldest}" Margin="0,0,14,0" />
             </WrapPanel>
             <Grid ColumnDefinitions="200,120,*,Auto" Classes="setting">
-              <TextBlock Classes="label" Text="{l:T 'Max hops (0 = any)'}" />
-              <NumericUpDown Grid.Column="1" Value="{Binding AutoAddMaxHops}" Minimum="0" Maximum="63" Increment="1" FormatString="0" VerticalAlignment="Center" />
+              <TextBlock Classes="label" Text="{l:T 'Max hops (0 = any)'}" IsVisible="{Binding SupportsAutoAddMaxHops}" />
+              <NumericUpDown Grid.Column="1" Value="{Binding AutoAddMaxHops}" Minimum="0" Maximum="63" Increment="1" FormatString="0" VerticalAlignment="Center" IsVisible="{Binding SupportsAutoAddMaxHops}" />
               <Button Grid.Column="3" Content="{l:T 'Save'}" Command="{Binding ApplyAutoAddCommand}" VerticalAlignment="Center" />
             </Grid>
-            <TextBlock Classes="hint" Margin="0,0,0,8" Text="{l:T 'Tip: press \'Load advanced settings\' below to read the current auto-add filters from the radio.'}" />
+            <TextBlock Classes="hint" Margin="0,0,0,8" IsVisible="{Binding SupportsAutoAddConfig}" Text="{l:T 'Tip: press \'Load advanced settings\' below to read the current auto-add filters from the radio.'}" />
           </StackPanel>
         </Border>
 
@@ -189,6 +212,9 @@
           </StackPanel>
         </Border>
       </StackPanel>
+
+      <!-- Firmware 1.18: Bluetooth/WiFi links, radio WiFi, remote CLI grants, power off (enable themselves) -->
+      <ContentControl Content="{Binding Sections}" />
 
       <!-- Battery (works offline) -->
       <TextBlock Classes="section" Text="{l:T 'BATTERY'}" />

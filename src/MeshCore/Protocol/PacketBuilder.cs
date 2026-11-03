@@ -7,10 +7,25 @@ public static class PacketBuilder
 {
     public const int PublicKeySize = 32;
     public const int PrivateKeySize = 64;
-    public const int RawDataMaxPathBytes = 64;
-    public const int RawDataMaxPayloadBytes = 184;
+    public const int RawDataMaxPathBytes = PathEncoding.MaxPathBytes;
     public const byte FloodPathSentinel = 0xFF;
-    public const int ChannelDataMaxPayloadBytes = 163;
+    /// <summary>Host-frame cap (<c>MAX_FRAME_SIZE</c> in firmware): no command frame may exceed 176 bytes.</summary>
+    public const int MaxFrameSize = 176;
+    /// <summary>RF payload limit for <c>CMD_SEND_CHANNEL_DATA</c>, matching firmware <c>MAX_GROUP_DATA_LENGTH</c> (165).
+    /// The remaining host-frame budget after the header and path can make the real limit smaller.</summary>
+    public const int ChannelDataMaxPayloadBytes = 165;
+    /// <summary>Channel name field width on the wire (32 bytes; the firmware keeps a C string, so at most 31 UTF-8 bytes).</summary>
+    public const int ChannelNameFieldBytes = 32;
+    public const int ChannelMaxNameBytes = ChannelNameFieldBytes - 1;
+    /// <summary>UTF-8 bytes after <see cref="CommandCode.RunCliCommand"/> that still fit <see cref="MaxFrameSize"/>.</summary>
+    public const int RunCliCommandMaxUtf8Bytes = MaxFrameSize - 1;
+    /// <summary>Firmware takes CMD 66 only when the frame is at least 3 bytes (opcode plus two UTF-8 bytes);
+    /// shorter frames fall through to "unsupported".</summary>
+    public const int RunCliCommandMinUtf8Bytes = 2;
+    /// <summary>CLI verb that asks the board to cut its own power.</summary>
+    public const string PowerOffCommand = "poweroff";
+    /// <summary>Size of a contact update frame: coordinates included, last_mod omitted so the radio stamps it.</summary>
+    public const int UpdateContactFrameSize = 144;
     private const int DefaultScopeNameField = 31;
     private const int DefaultScopeMaxNameBytes = 30;
     private const int DefaultScopeKeyBytes = 16;
@@ -122,6 +137,11 @@ public static class PacketBuilder
         UpdateContact(contact.PublicKey, contact.TypeRawValue, contact.Flags, contact.OutPathLength, contact.OutPath,
             contact.AdvertisedName, contact.LastAdvertisement, contact.Latitude, contact.Longitude);
 
+    /// <summary>
+    /// Contact update frame (144 bytes): [0x09][pubkey 32][type][flags][out_path_len][out_path 64][name 32]
+    /// [last_advert u32][lat i32][lon i32]. The raw type byte is forwarded verbatim. last_mod is omitted so the radio
+    /// timestamps the change with its own clock.
+    /// </summary>
     public static byte[] UpdateContact(byte[] publicKey, byte typeRaw, ContactFlags flags, byte outPathLength, byte[] outPath,
         string advertisedName, DateTimeOffset lastAdvertisement, double latitude, double longitude)
     {
@@ -134,9 +154,8 @@ public static class PacketBuilder
             .Raw(advertisedName.Utf8PaddedOrTruncated(32))
             .U32(Bytes.EpochSeconds32(lastAdvertisement))
             .I32(ScaledCoordinate(latitude, LatitudeRange))
-            .I32(ScaledCoordinate(longitude, LongitudeRange))
-            .Raw([0, 0, 0]);
-        return w.ToArray(); // 147 bytes
+            .I32(ScaledCoordinate(longitude, LongitudeRange));
+        return w.ToArray(); // 144 bytes
     }
 
     // MARK: Messaging
@@ -150,8 +169,17 @@ public static class PacketBuilder
             .Utf8(text)
             .ToArray();
 
+    /// <summary>CLI command to a repeater or room server (<see cref="TextType.CliData"/>).</summary>
     public static byte[] SendCommand(byte[] destination, string command, DateTimeOffset timestamp) =>
-        new ByteWriter((byte)CommandCode.SendMessage, 0x01, 0x00)
+        SendCommand(destination, command, TextType.CliData, timestamp);
+
+    /// <summary>
+    /// CLI command message: [0x02][textType][0x00][timestamp u32][dest prefix 6][UTF-8 command].
+    /// Use <see cref="TextType.CliData"/> for a repeater or room, <see cref="TextType.CliCommand"/> for a contact's
+    /// companion radio (firmware v14+; the contact must have granted this radio remote CLI).
+    /// </summary>
+    public static byte[] SendCommand(byte[] destination, string command, TextType textType, DateTimeOffset timestamp) =>
+        new ByteWriter((byte)CommandCode.SendMessage, (byte)textType, 0x00)
             .U32(Bytes.EpochSeconds32(timestamp))
             .Raw(destination.Prefix(6))
             .Utf8(command)
@@ -183,9 +211,10 @@ public static class PacketBuilder
 
     public static byte[] GetChannel(byte index) => [(byte)CommandCode.GetChannel, index];
 
+    /// <summary>[0x20][index][name 32: at most 31 UTF-8 bytes, cut at a character boundary, NUL padded][secret 16].</summary>
     public static byte[] SetChannel(byte index, string name, byte[] secret) =>
         new ByteWriter((byte)CommandCode.SetChannel, index)
-            .Raw(name.Utf8PaddedOrTruncated(32))
+            .Raw(name.Utf8Prefix(ChannelMaxNameBytes).Utf8PaddedOrTruncated(ChannelNameFieldBytes))
             .Raw(secret.Prefix(16))
             .ToArray();
 
@@ -251,14 +280,35 @@ public static class PacketBuilder
 
     public static byte[] SetFloodScopeUnscoped() => [(byte)CommandCode.SetFloodScope, 0x01];
 
+    /// <summary>
+    /// [0x3E][channel][path_len][path bytes, omitted for flood][dataType u16][payload].
+    /// The payload must fit both <see cref="ChannelDataMaxPayloadBytes"/> (165) and the remaining
+    /// <see cref="MaxFrameSize"/> budget after the header and path.
+    /// </summary>
+    /// <exception cref="MeshCoreException"><see cref="MeshCoreErrorKind.InvalidInput"/> when the payload is too big.</exception>
     public static byte[] SendChannelData(byte channelIndex, ushort dataType, byte[] payload, byte pathLength = FloodPathSentinel, byte[]? pathBytes = null)
     {
         var w = new ByteWriter((byte)CommandCode.SendChannelData, channelIndex, pathLength);
         if (pathLength != FloodPathSentinel && pathBytes is not null) w.Raw(pathBytes);
         w.U16(dataType);
-        w.Raw(payload.Prefix(ChannelDataMaxPayloadBytes));
+        var max = Math.Min(ChannelDataMaxPayloadBytes, MaxFrameSize - w.Count);
+        if (payload.Length > max)
+            throw new MeshCoreException(MeshCoreErrorKind.InvalidInput, $"payload is {payload.Length} bytes; command permits {max}");
+        w.Raw(payload);
         return w.ToArray();
     }
+
+    /// <summary>Largest channel-data payload that fits for a given path length byte and path.</summary>
+    public static int ChannelDataPayloadLimit(byte pathLength = FloodPathSentinel, int pathByteCount = 0) =>
+        Math.Max(0, Math.Min(ChannelDataMaxPayloadBytes, MaxFrameSize - (5 + (pathLength == FloodPathSentinel ? 0 : pathByteCount))));
+
+    /// <summary>
+    /// <c>CMD_RUN_CLI_COMMAND</c> (66): opcode plus the UTF-8 command bytes, verbatim (no terminator, no prefix).
+    /// Firmware v14+. The session validates the length (<see cref="RunCliCommandMinUtf8Bytes"/>..
+    /// <see cref="RunCliCommandMaxUtf8Bytes"/>) before sending.
+    /// </summary>
+    public static byte[] RunCliCommand(string command) =>
+        new ByteWriter((byte)CommandCode.RunCliCommand).Utf8(command).ToArray();
 
     public static byte[] SetDefaultFloodScope(string name, byte[] scopeKey)
     {
@@ -275,12 +325,26 @@ public static class PacketBuilder
 
     public static byte[] GetDefaultFloodScope() => [(byte)CommandCode.GetDefaultFloodScope];
 
+    /// <summary>
+    /// [0x39][pubkey 32][type][path_len][out-path hops in reverse order]. Each hop's hash bytes are kept in order
+    /// (only the hop order is reversed) so multi-byte hashes form a valid return route.
+    /// </summary>
     public static byte[] SendAnonReq(byte[] publicKey, AnonRequestType type, byte pathLength, byte[] path)
     {
-        var reversed = (byte[])path.Clone();
-        Array.Reverse(reversed);
-        return new ByteWriter((byte)CommandCode.SendAnonReq)
-            .Raw(publicKey.Prefix(PublicKeySize)).U8((byte)type).U8(pathLength).Raw(reversed).ToArray();
+        var w = new ByteWriter((byte)CommandCode.SendAnonReq)
+            .Raw(publicKey.Prefix(PublicKeySize)).U8((byte)type).U8(pathLength);
+        if (PathEncoding.Decode(pathLength) is { } dec && dec.ByteLength == path.Length)
+        {
+            for (var offset = path.Length - dec.HashSize; offset >= 0; offset -= dec.HashSize)
+                w.Raw(path.AsSpan(offset, dec.HashSize));
+        }
+        else
+        {
+            var reversed = (byte[])path.Clone();
+            Array.Reverse(reversed);
+            w.Raw(reversed);
+        }
+        return w.ToArray();
     }
 
     public static byte[] SetPathHashMode(byte mode) =>
@@ -300,10 +364,26 @@ public static class PacketBuilder
         return w.ToArray();
     }
 
-    public static byte[] SendRawData(byte[] path, byte[] payload)
+    /// <summary>
+    /// [0x19][path_len verbatim][exactly the decoded path byte count][payload]. Mode 3 (reserved) writes no path bytes
+    /// (the firmware rejects that frame).
+    /// </summary>
+    /// <exception cref="MeshCoreException"><see cref="MeshCoreErrorKind.InvalidInput"/> when the path is shorter than the
+    /// encoded length (missing bytes would come from the payload) or the payload doesn't fit the 176-byte host frame.</exception>
+    public static byte[] SendRawData(byte pathLength, byte[] path, byte[] payload)
     {
-        var clamped = path.Prefix(RawDataMaxPathBytes);
-        return new ByteWriter((byte)CommandCode.SendRawData).U8((byte)clamped.Length).Raw(clamped).Raw(payload.Prefix(RawDataMaxPayloadBytes)).ToArray();
+        var w = new ByteWriter((byte)CommandCode.SendRawData, pathLength);
+        if (PathEncoding.Decode(pathLength) is { } dec)
+        {
+            if (path.Length < dec.ByteLength)
+                throw new MeshCoreException(MeshCoreErrorKind.InvalidInput, $"path is {path.Length} bytes; encoded length needs {dec.ByteLength}");
+            w.Raw(path.AsSpan(0, dec.ByteLength));
+        }
+        var max = MaxFrameSize - w.Count;
+        if (payload.Length > max)
+            throw new MeshCoreException(MeshCoreErrorKind.InvalidInput, $"payload is {payload.Length} bytes; command permits {max}");
+        w.Raw(payload);
+        return w.ToArray();
     }
 
     public static byte[] HasConnection(byte[] publicKey) => new ByteWriter((byte)CommandCode.HasConnection).Raw(EncodePublicKey(publicKey)).ToArray();

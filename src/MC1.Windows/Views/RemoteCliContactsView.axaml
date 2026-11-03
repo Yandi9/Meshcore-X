@@ -1,0 +1,45 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:l="using:MC1.Windows.Localization"
+             xmlns:vm="using:MC1.Windows.ViewModels"
+             x:Class="MC1.Windows.Views.RemoteCliContactsView"
+             x:DataType="vm:RemoteCliContactsViewModel">
+  <!-- Contacts allowed to run CLI commands on this radio over the mesh. -->
+  <DockPanel Margin="20,16,20,16">
+    <StackPanel DockPanel.Dock="Top" Spacing="8">
+      <TextBlock Classes="hint" Text="{l:T 'Allowed contacts can control this radio over the mesh. The app will not alert you when they do.'}" />
+      <TextBox Text="{Binding Search}" Watermark="{l:T 'Search contacts'}" />
+      <CheckBox Content="{l:T 'Favorites only'}" IsChecked="{Binding FavoritesOnly}" />
+    </StackPanel>
+    <StackPanel DockPanel.Dock="Bottom" Spacing="8" Margin="0,10,0,0">
+      <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding Error, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+      <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+        <ProgressBar IsIndeterminate="True" Width="50" MinWidth="50" IsVisible="{Binding Busy}" VerticalAlignment="Center" />
+        <Button Content="{l:T 'Cancel'}" Command="{Binding CancelCommand}" IsCancel="True" />
+        <Button Classes="accent" Content="{l:T 'Apply'}" Command="{Binding ApplyCommand}" IsEnabled="{Binding CanApply}" />
+      </StackPanel>
+    </StackPanel>
+    <Border Classes="group" Margin="0,10,0,0" Padding="8,4">
+      <Panel>
+        <StackPanel IsVisible="{Binding IsEmpty}" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="4" Margin="0,24">
+          <TextBlock Text="{Binding EmptyTitle}" Classes="h3" HorizontalAlignment="Center" />
+          <TextBlock Text="{Binding EmptyText}" Classes="hint" HorizontalAlignment="Center" TextAlignment="Center" />
+        </StackPanel>
+        <ScrollViewer IsVisible="{Binding !IsEmpty}">
+          <ItemsControl ItemsSource="{Binding Rows}" IsEnabled="{Binding !Busy}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:RemoteCliContactRow">
+                <CheckBox IsChecked="{Binding IsAllowed}" Margin="6,2" HorizontalAlignment="Stretch">
+                  <StackPanel Orientation="Horizontal" Spacing="6">
+                    <TextBlock Text="{Binding Name}" VerticalAlignment="Center" />
+                    <PathIcon Classes="small" Data="{StaticResource Icon.Star}" Foreground="{DynamicResource App.Warning}" IsVisible="{Binding IsFavorite}" VerticalAlignment="Center" />
+                  </StackPanel>
+                </CheckBox>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
+      </Panel>
+    </Border>
+  </DockPanel>
+</UserControl>

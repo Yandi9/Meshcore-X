@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using MC1.Core.Maps;
 using MC1.Core.Models;
 using MC1.Core.Services;
 using MC1.Core.Utilities;
@@ -10,6 +11,16 @@ using MeshCore;
 
 namespace MC1.Windows.ViewModels;
 
+/// <summary>A chip over the map for one active advanced filter (click to edit, ✕ to remove).</summary>
+public sealed record MapFilterChip(MapFilterDimension Dimension, string Text)
+{
+    public string IconKey => Dimension == MapFilterDimension.LastHeard ? "Icon.ClockOutline" : "Icon.Hop";
+    public string RemoveTip => L.F("Remove filter: {0}", Text);
+}
+
+/// <summary>A detail level offered for an offline download ("Local (zoom 12)").</summary>
+public sealed record MapDetailOption(int Zoom, string Name);
+
 public sealed partial class MapViewModel : ViewModelBase
 {
     private readonly MainWindowViewModel _main;
@@ -18,6 +29,12 @@ public sealed partial class MapViewModel : ViewModelBase
     private MapMarker? _pin;
     private List<MapMarker> _pathMarkers = new();
     private CancellationTokenSource? _downloadCts;
+    private readonly Debouncer _estimate;
+    /// <summary>The running download is being thrown away (offline maps cleared): don't keep it as paused.</summary>
+    private bool _discardDownload;
+    private readonly Avalonia.Threading.DispatcherTimer _filterClock;
+    /// <summary>Rolling "last heard" windows are re-checked on this cadence, so nodes age out without new traffic.</summary>
+    private static readonly TimeSpan FilterClockInterval = TimeSpan.FromSeconds(60);
 
     public MapViewModel(MainWindowViewModel main)
     {
@@ -31,9 +48,17 @@ public sealed partial class MapViewModel : ViewModelBase
         _showRepeaters = s.MapShowRepeaters;
         _showRooms = s.MapShowRooms;
         _showDiscovered = s.MapShowDiscovered;
+        _filter = (s.MapFilter ?? new MapAdvancedFilter()).Sanitized();
         _reload = new Debouncer(TimeSpan.FromMilliseconds(300), Reload);
         _persist = new Debouncer(TimeSpan.FromSeconds(1), Persist);
+        _estimate = new Debouncer(TimeSpan.FromMilliseconds(250), UpdateEstimate);
+        _filterClock = new Avalonia.Threading.DispatcherTimer { Interval = FilterClockInterval };
+        _filterClock.Tick += (_, _) => Reload();
+        Track(() => _filterClock.Stop());
         OnData(c => { if (c.Kind is DataKind.Contacts or DataKind.Discovered or DataKind.Radio) _reload.Trigger(); });
+        RebuildFilterChips();
+        UpdateFilterClock();
+        LoadPendingDownload();
     }
 
     public ObservableCollection<MapMarker> Markers { get; } = new();
@@ -56,6 +81,8 @@ public sealed partial class MapViewModel : ViewModelBase
 
     /// <summary>Provided by the view: visible bounds (north, south, west, east) and viewport size.</summary>
     public Func<(double North, double South, double West, double East)>? VisibleBounds { get; set; }
+    /// <summary>Provided by the view: the area inside the offline-download frame.</summary>
+    public Func<GeoBounds>? SelectionArea { get; set; }
     public Func<(double Width, double Height)>? ViewportSize { get; set; }
 
     [ObservableProperty] private double _centerLatitude;
@@ -85,26 +112,59 @@ public sealed partial class MapViewModel : ViewModelBase
     [ObservableProperty] private bool _selCanMessage;
     [ObservableProperty] private bool _selCanManage;
 
+    // advanced filters
+    [ObservableProperty] private MapAdvancedFilter _filter;
+    public ObservableCollection<MapFilterChip> FilterChips { get; } = new();
+    [ObservableProperty] private bool _hasFilterChips;
+
     // offline download
     [ObservableProperty] private bool _isDownloadPanelOpen;
     [ObservableProperty] private bool _isDownloading;
     [ObservableProperty] private double _downloadProgress;
     [ObservableProperty] private string _downloadText = "";
-    [ObservableProperty] private int _downloadMinZoom = 8;
+    /// <summary>The detail (highest zoom) to save, in map zooms.</summary>
     [ObservableProperty] private int _downloadMaxZoom = 14;
+    public ObservableCollection<MapDetailOption> DetailOptions { get; } = new();
+    [ObservableProperty] private MapDetailOption? _selectedDetail;
     [ObservableProperty] private string _downloadEstimate = "";
+    [ObservableProperty] private string _downloadTiles = "";
+    /// <summary>Why the area can't be (or should think twice before being) downloaded; null when fine.</summary>
+    [ObservableProperty] private string? _downloadWarning;
+    [ObservableProperty] private bool _canDownload;
+    [ObservableProperty] private bool _layerAllowsDownload = true;
     [ObservableProperty] private string _cacheSize = "";
+    /// <summary>The frame of the area to save is drawn (panel open, nothing downloading).</summary>
+    [ObservableProperty] private bool _showSelection;
+    /// <summary>The area being (or last) downloaded, outlined on the map while the panel is open.</summary>
+    [ObservableProperty] private GeoBounds? _downloadArea;
+    /// <summary>A paused or interrupted download that can be resumed.</summary>
+    [ObservableProperty] private bool _hasPendingDownload;
+    [ObservableProperty] private string _pendingDownloadText = "";
 
-    partial void OnCenterLatitudeChanged(double value) => _persist.Trigger();
-    partial void OnCenterLongitudeChanged(double value) => _persist.Trigger();
-    partial void OnZoomChanged(double value) => _persist.Trigger();
-    partial void OnLayerIdChanged(string value) { _persist.Trigger(); UpdateEstimate(); }
+    partial void OnCenterLatitudeChanged(double value) { _persist.Trigger(); if (IsDownloadPanelOpen) _estimate.Trigger(); }
+    partial void OnCenterLongitudeChanged(double value) { _persist.Trigger(); if (IsDownloadPanelOpen) _estimate.Trigger(); }
+    partial void OnZoomChanged(double value) { _persist.Trigger(); if (IsDownloadPanelOpen) _estimate.Trigger(); }
+    partial void OnLayerIdChanged(string value)
+    {
+        _persist.Trigger();
+        if (IsDownloadPanelOpen) RefreshDetailOptions();
+    }
     partial void OnShowChatChanged(bool value) { _persist.Trigger(); Reload(); }
     partial void OnShowRepeatersChanged(bool value) { _persist.Trigger(); Reload(); }
     partial void OnShowRoomsChanged(bool value) { _persist.Trigger(); Reload(); }
     partial void OnShowDiscoveredChanged(bool value) { _persist.Trigger(); Reload(); }
-    partial void OnDownloadMinZoomChanged(int value) => UpdateEstimate();
     partial void OnDownloadMaxZoomChanged(int value) => UpdateEstimate();
+    partial void OnSelectedDetailChanged(MapDetailOption? value) { if (value is not null) DownloadMaxZoom = value.Zoom; }
+    partial void OnIsDownloadPanelOpenChanged(bool value) => UpdateSelectionFrame();
+    partial void OnIsDownloadingChanged(bool value) { UpdateSelectionFrame(); UpdateEstimate(); }
+
+    partial void OnFilterChanged(MapAdvancedFilter value)
+    {
+        _persist.Trigger();
+        RebuildFilterChips();
+        UpdateFilterClock();
+        Reload();
+    }
 
     private void Persist() => Core.Settings.Update(s =>
     {
@@ -116,6 +176,7 @@ public sealed partial class MapViewModel : ViewModelBase
         s.MapShowRepeaters = ShowRepeaters;
         s.MapShowRooms = ShowRooms;
         s.MapShowDiscovered = ShowDiscovered;
+        s.MapFilter = Filter;
     });
 
     private bool _shownOnce;
@@ -124,6 +185,7 @@ public sealed partial class MapViewModel : ViewModelBase
     {
         Reload();
         OnPropertyChanged(nameof(Metric));
+        ResumeInterruptedDownload();
         if (!_shownOnce && Markers.Count > 0)
         {
             _shownOnce = true;
@@ -141,15 +203,15 @@ public sealed partial class MapViewModel : ViewModelBase
         var selId = SelectedMarker?.Id;
         var list = new List<MapMarker>();
         var contacts = Core.Contacts.GetAll();
+        var now = DateTimeOffset.UtcNow;
+        var types = new MapNodeFilter.TypeToggles(ShowChat, ShowRepeaters, ShowRooms, ShowDiscovered);
+        // With an advanced filter on, the summary also counts what it hides.
+        var unfiltered = 0;
         foreach (var c in contacts.Where(c => c.HasLocation && !c.IsBlocked))
         {
-            var include = c.ContactType switch
-            {
-                ContactType.Repeater => ShowRepeaters,
-                ContactType.Room => ShowRooms,
-                _ => ShowChat,
-            };
-            if (!include) continue;
+            if (!MapNodeFilter.AllowsType(c.ContactType, types)) continue;
+            unfiltered++;
+            if (!MapNodeFilter.Shows(c, types, Filter, now)) continue;
             list.Add(new MapMarker
             {
                 Id = "c:" + c.Id,
@@ -168,6 +230,8 @@ public sealed partial class MapViewModel : ViewModelBase
         {
             foreach (var d in Core.Contacts.GetDiscovered().Where(d => d.HasLocation && !known.Contains(d.PublicKeyHex)))
             {
+                unfiltered++;
+                if (!MapNodeFilter.Shows(d, types, Filter, now)) continue;
                 list.Add(new MapMarker
                 {
                     Id = "d:" + d.Id,
@@ -195,7 +259,9 @@ public sealed partial class MapViewModel : ViewModelBase
         Markers.Clear();
         foreach (var m in list) Markers.Add(m);
         var located = list.Count(m => m.Kind is not (MapMarkerKind.Self or MapMarkerKind.Pin or MapMarkerKind.Hop));
-        Summary = L.Plural(located, "{0} node with location", "{0} nodes with location");
+        Summary = Filter.IsActive
+            ? L.F("{0} of {1} nodes with location match the filters", located, unfiltered)
+            : L.Plural(located, "{0} node with location", "{0} nodes with location");
         if (selId is not null) SelectedMarker = list.FirstOrDefault(m => m.Id == selId);
     }
 
@@ -433,7 +499,31 @@ public sealed partial class MapViewModel : ViewModelBase
         }, L.T("Set location"));
     }
 
-    // ---- offline tiles ----
+    // ---- advanced filters ----
+
+    private void RebuildFilterChips()
+    {
+        FilterChips.Clear();
+        foreach (var d in Filter.ActiveDimensions) FilterChips.Add(new MapFilterChip(d, Filter.ChipText(d)));
+        HasFilterChips = FilterChips.Count > 0;
+    }
+
+    private void UpdateFilterClock()
+    {
+        if (Filter.LastHeard.IsActive) { if (!_filterClock.IsEnabled) _filterClock.Start(); }
+        else _filterClock.Stop();
+    }
+
+    [RelayCommand]
+    private async Task ShowAdvancedFilters() =>
+        await AppHost.Dialogs.ShowDialog(new MapFiltersViewModel(this), L.T("Advanced Filters"), 500, 660);
+
+    [RelayCommand]
+    private void RemoveFilter(MapFilterChip chip) => Filter = Filter.Cleared(chip.Dimension);
+
+    // ---- offline maps ----
+
+    private string LayerTitle(string id) => Layers.FirstOrDefault(l => l.Id == id)?.Name ?? id;
 
     [RelayCommand]
     private void ToggleDownloadPanel()
@@ -441,39 +531,93 @@ public sealed partial class MapViewModel : ViewModelBase
         IsDownloadPanelOpen = !IsDownloadPanelOpen;
         if (IsDownloadPanelOpen)
         {
-            DownloadMinZoom = Math.Max(1, (int)Zoom - 2);
-            DownloadMaxZoom = Math.Min(TileService.Layer(LayerId).MaxOfflineZoom, (int)Zoom + 3);
-            UpdateEstimate();
-            _ = Task.Run(() => TileService.CacheSizeBytes()).ContinueWith(t => Ui(() => CacheSize = Formatters.Bytes(t.Result)));
+            RefreshDetailOptions();
+            RefreshCacheSize();
         }
+    }
+
+    private void RefreshCacheSize() =>
+        _ = Task.Run(TileService.CacheSizeBytes).ContinueWith(t => Ui(() => CacheSize = Formatters.Bytes(t.Result)));
+
+    private void UpdateSelectionFrame()
+    {
+        ShowSelection = IsDownloadPanelOpen && !IsDownloading && LayerAllowsDownload;
+        DownloadArea = IsDownloadPanelOpen && (IsDownloading || HasPendingDownload) ? Core.Settings.Current.OfflineMapDownload?.Area : null;
+    }
+
+    /// <summary>Detail levels of the current layer; picks the most detailed one the framed area allows.</summary>
+    private void RefreshDetailOptions()
+    {
+        var profile = OfflineMapPolicy.Profile(LayerId);
+        LayerAllowsDownload = profile.AllowsDownload;
+        DetailOptions.Clear();
+        if (profile.AllowsDownload)
+            for (var z = profile.MinZoom; z <= profile.MaxZoom; z++) DetailOptions.Add(new MapDetailOption(z, OfflineMapPolicy.DetailName(z)));
+        var best = SelectionArea is { } area && profile.AllowsDownload ? OfflineMapPolicy.MostDetailedPermitted(area(), LayerId) : profile.MaxZoom;
+        SelectedDetail = DetailOptions.FirstOrDefault(o => o.Zoom == best) ?? DetailOptions.LastOrDefault();
+        UpdateSelectionFrame();
+        UpdateEstimate();
     }
 
     private void UpdateEstimate()
     {
-        if (VisibleBounds is null) return;
-        var (n, s, w, e) = VisibleBounds();
-        var max = TileService.Layer(LayerId).MaxOfflineZoom;
-        if (DownloadMaxZoom > max) DownloadMaxZoom = max;
-        if (DownloadMinZoom > DownloadMaxZoom) DownloadMinZoom = DownloadMaxZoom;
-        var count = TileService.CountTiles(n, s, w, e, DownloadMinZoom, DownloadMaxZoom);
-        DownloadEstimate = L.Plural(count, "{0:N0} tile (≈{1}) · max zoom for this layer: {2}", "{0:N0} tiles (≈{1}) · max zoom for this layer: {2}", Formatters.Bytes(count * 25_000L), max);
+        if (!IsDownloadPanelOpen) return;
+        var profile = OfflineMapPolicy.Profile(LayerId);
+        if (!profile.AllowsDownload)
+        {
+            DownloadEstimate = "";
+            DownloadTiles = "";
+            DownloadWarning = L.T("Topographic maps can't be downloaded for offline use. Areas you saved before still work offline.");
+            CanDownload = false;
+            return;
+        }
+        if (SelectionArea is not { } selection) return;
+        var summary = OfflineMapPolicy.Summary(selection(), LayerId, DownloadMaxZoom);
+        DownloadEstimate = L.F("Approximate saved map size: ~{0}", Formatters.Bytes(summary.EstimatedBytes));
+        DownloadTiles = L.Plural(summary.TileCount, "{0:N0} file to download", "{0:N0} files to download");
+        var available = TileService.AvailableBytes();
+        var fits = available is not { } free || summary.EstimatedBytes <= free;
+        DownloadWarning = !summary.PermitsDownload ? L.T("Reduce detail or select a smaller area to stay within the map provider's download limit.")
+            : !fits ? L.T("Reduce detail or select a smaller area to fit the available storage.")
+            : summary.EstimatedBytes > OfflineMapPolicy.LargeDownloadBytes ? L.T("Large download area. This may take a while and use significant storage.")
+            : null;
+        CanDownload = summary.PermitsDownload && fits && !IsDownloading;
     }
 
     [RelayCommand]
     private async Task DownloadVisibleArea()
     {
-        if (VisibleBounds is null || IsDownloading) return;
-        var (n, s, w, e) = VisibleBounds();
-        var count = TileService.CountTiles(n, s, w, e, DownloadMinZoom, DownloadMaxZoom);
-        if (count > 30_000)
+        if (SelectionArea is not { } selection || IsDownloading) return;
+        var profile = OfflineMapPolicy.Profile(LayerId);
+        if (!profile.AllowsDownload) return;
+        var area = selection();
+        var summary = OfflineMapPolicy.Summary(area, LayerId, DownloadMaxZoom);
+        if (!summary.PermitsDownload)
         {
-            await AppHost.Dialogs.ShowError(L.T("Area too large"), L.Plural(count, "That would download {0:N0} tile. Zoom in or lower the maximum zoom (limit {1:N0} tiles).", "That would download {0:N0} tiles. Zoom in or lower the maximum zoom (limit {1:N0} tiles).", 30_000));
+            await AppHost.Dialogs.ShowError(L.T("Area too large"), L.T("Reduce detail or select a smaller area to stay within the map provider's download limit."));
             return;
         }
+        if (TileService.AvailableBytes() is { } free && summary.EstimatedBytes > free)
+        {
+            await AppHost.Dialogs.ShowError(L.T("Not enough storage"), L.T("Reduce detail or select a smaller area to fit the available storage."));
+            return;
+        }
+        var job = new OfflineMapDownloadJob { LayerId = LayerId, Area = area, MaxZoom = summary.MaxZoom };
+        Core.Settings.Update(s => s.OfflineMapDownload = job);
+        await RunDownloadAsync(job);
+    }
+
+    /// <summary>Runs (or continues) a download. Saved files are skipped, so a resumed download picks up where it stopped.</summary>
+    private async Task RunDownloadAsync(OfflineMapDownloadJob job)
+    {
+        if (IsDownloading) return;
+        _discardDownload = false;
         _downloadCts = new CancellationTokenSource();
         IsDownloading = true;
+        HasPendingDownload = false;
         DownloadProgress = 0;
-        DownloadText = L.F("Downloading {0:N0} / {1:N0}…", 0, count);
+        DownloadText = L.T("Starting download…");
+        UpdateSelectionFrame();
         try
         {
             var progress = new Progress<(int Done, int Total)>(p =>
@@ -481,19 +625,89 @@ public sealed partial class MapViewModel : ViewModelBase
                 DownloadProgress = 100.0 * p.Done / Math.Max(1, p.Total);
                 DownloadText = L.F("Downloading {0:N0} / {1:N0}…", p.Done, p.Total);
             });
-            var failed = await TileService.Instance.DownloadAreaAsync(LayerId, n, s, w, e, DownloadMinZoom, DownloadMaxZoom, progress, _downloadCts.Token);
-            DownloadText = failed == 0
-                ? L.Plural(count, "Done — {0:N0} tile available offline.", "Done — {0:N0} tiles available offline.")
-                : L.Plural(failed, "Done — {0:N0} tile could not be downloaded.", "Done — {0:N0} tiles could not be downloaded.");
+            var failed = await TileService.Instance.DownloadAreaAsync(job.LayerId, job.Area, job.MaxZoom, progress, _downloadCts.Token);
+            if (failed == 0)
+            {
+                Core.Settings.Update(s => s.OfflineMapDownload = null);
+                DownloadText = L.F("Done — the area of the {0} map is saved on this PC.", LayerTitle(job.LayerId));
+            }
+            else
+            {
+                SavePaused(job, failed);
+                DownloadText = L.Plural(failed, "Done — {0:N0} tile could not be downloaded.", "Done — {0:N0} tiles could not be downloaded.");
+            }
         }
-        catch (OperationCanceledException) { DownloadText = L.T("Download cancelled."); }
-        catch (Exception ex) { DownloadText = L.F("Download failed: {0}", ex.Message); }
+        catch (OperationCanceledException)
+        {
+            SavePaused(job, job.FailedTiles);
+            DownloadText = L.T("Download paused. You can resume it later, even after restarting.");
+        }
+        catch (Exception ex)
+        {
+            SavePaused(job, job.FailedTiles);
+            DownloadText = L.F("Download failed: {0}", ex.Message);
+        }
         finally
         {
             IsDownloading = false;
             _downloadCts = null;
+            LoadPendingDownload();
             CacheSize = Formatters.Bytes(await Task.Run(TileService.CacheSizeBytes));
         }
+    }
+
+    private void SavePaused(OfflineMapDownloadJob job, int failed)
+    {
+        if (_discardDownload) return;
+        job.Paused = true;
+        job.FailedTiles = failed;
+        Core.Settings.Update(s => s.OfflineMapDownload = job);
+    }
+
+    private void LoadPendingDownload()
+    {
+        var job = Core.Settings.Current.OfflineMapDownload;
+        HasPendingDownload = job is not null && !IsDownloading;
+        PendingDownloadText = job is null ? ""
+            : !OfflineMapPolicy.Profile(job.LayerId).AllowsDownload ? L.T("A download of the topographic map can't continue: those maps can't be downloaded any more.")
+            : job.FailedTiles > 0 ? L.Plural(job.FailedTiles, "The last download of the {1} map missed {0:N0} tile. Resume to try again.", "The last download of the {1} map missed {0:N0} tiles. Resume to try again.", LayerTitle(job.LayerId))
+            : job.Paused ? L.F("The download of the {0} map is paused.", LayerTitle(job.LayerId))
+            : L.F("The download of the {0} map was interrupted.", LayerTitle(job.LayerId));
+        UpdateSelectionFrame();
+    }
+
+    /// <summary>A download cut short by closing the app continues when the map is opened again (unless the user paused it).</summary>
+    private void ResumeInterruptedDownload()
+    {
+        if (IsDownloading || Core.Settings.Current.OfflineMapDownload is not { Paused: false } job) return;
+        if (!OfflineMapPolicy.Profile(job.LayerId).AllowsDownload) { LoadPendingDownload(); return; }
+        if (!IsDownloadPanelOpen) ToggleDownloadPanel();
+        _ = RunDownloadAsync(job);
+    }
+
+    [RelayCommand]
+    private async Task ResumeDownload()
+    {
+        if (IsDownloading || Core.Settings.Current.OfflineMapDownload is not { } job) return;
+        if (!OfflineMapPolicy.Profile(job.LayerId).AllowsDownload)
+        {
+            DiscardDownload();
+            DownloadText = L.T("Topographic maps can't be downloaded for offline use. Areas you saved before still work offline.");
+            return;
+        }
+        job.Paused = false;
+        job.FailedTiles = 0;
+        Core.Settings.Update(s => s.OfflineMapDownload = job);
+        await RunDownloadAsync(job);
+    }
+
+    /// <summary>Forgets a paused download (what it saved stays until the offline maps are cleared).</summary>
+    [RelayCommand]
+    private void DiscardDownload()
+    {
+        Core.Settings.Update(s => s.OfflineMapDownload = null);
+        DownloadText = "";
+        LoadPendingDownload();
     }
 
     [RelayCommand] private void CancelDownload() => _downloadCts?.Cancel();
@@ -502,7 +716,11 @@ public sealed partial class MapViewModel : ViewModelBase
     private async Task ClearTileCache()
     {
         if (!await AppHost.Dialogs.Confirm(L.T("Clear offline maps?"), L.T("Deletes all downloaded and cached map tiles."), L.T("Clear"), true)) return;
+        _discardDownload = true;
+        _downloadCts?.Cancel();
         TileService.Instance.ClearCache();
+        Core.Settings.Update(s => s.OfflineMapDownload = null);
+        LoadPendingDownload();
         CacheSize = Formatters.Bytes(0);
         DownloadText = L.T("Offline maps cleared.");
     }

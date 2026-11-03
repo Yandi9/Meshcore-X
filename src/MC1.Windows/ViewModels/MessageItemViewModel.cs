@@ -220,6 +220,10 @@ public sealed partial class MessageItemViewModel : ObservableObject
         OnPropertyChanged(nameof(CanResend));
     }
 
+    /// <summary>
+    /// Loads the picture or link preview after the bubble is shown (the fetch and decoding run in the background, so
+    /// a slow site never holds up the chat).
+    /// </summary>
     private async Task LoadPreviewAsync(MessageRecord m)
     {
         var settings = AppHost.Core.Settings.Current;
@@ -228,8 +232,10 @@ public sealed partial class MessageItemViewModel : ObservableObject
         {
             if (IsImageUrl && settings.ShowInlineImages)
             {
-                InlineImage = await LinkPreviewService.Instance.LoadImageAsync(LinkDetector.DirectImageUrl(FirstUrl), 360);
-                return;
+                var image = await LinkPreviewService.Instance.LoadInlineImageAsync(LinkDetector.DirectImageUrl(FirstUrl), 360);
+                InlineImage = image.Image;
+                // An image link that is really a page (imgur, prnt.sc…) gets a link preview instead.
+                if (!image.ServesPage) return;
             }
             if (!settings.ShowLinkPreviews) return;
             var preview = await LinkPreviewService.Instance.GetPreviewAsync(m, FirstUrl);

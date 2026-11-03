@@ -30,6 +30,12 @@
           <DataTemplate><TextBlock Text="{Binding Converter={x:Static conv:EnumDisplayConverter.Instance}}" /></DataTemplate>
         </ComboBox.ItemTemplate>
       </ComboBox>
+      <CheckBox IsChecked="{Binding IsPinned}" Margin="0,4,0,0" ToolTip.Tip="{l:T 'Pinned chats are listed first, on this PC.'}">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <PathIcon Classes="small" Data="{StaticResource Icon.PinOutline}" />
+          <TextBlock Text="{l:T 'Pin'}" />
+        </StackPanel>
+      </CheckBox>
 
       <TextBlock Classes="section" Text="{l:T 'FLOOD SCOPE (REGION)'}" />
       <TextBlock Classes="hint" Text="{l:T 'Limit how far messages on this channel flood, using region transport codes (requires firmware support).'}" />

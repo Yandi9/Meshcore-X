@@ -59,6 +59,7 @@ public sealed partial class MeshApp : IAsyncDisposable
         NodeConfig = new NodeConfigService(this);
         Backup = new BackupService(this);
         PendingConfig = new PendingConfigService(this);
+        DataChanged += RevokeRemoteCliWhenBlocked;
         Log.Info("App", $"MeshCore for Windows started. Data folder: {AppPaths.Root}");
     }
 
@@ -137,7 +138,7 @@ public sealed partial class MeshApp : IAsyncDisposable
     private IMeshTransport CreateTransport(ConnectionTarget t) => t.Kind switch
     {
         ConnectionKind.Serial => new SerialTransport(t.Address),
-        ConnectionKind.Tcp => new TcpTransport(t.Address, t.Port),
+        ConnectionKind.Tcp => TcpTransportFactory?.Invoke(t) ?? new TcpTransport(t.Address, t.Port),
         ConnectionKind.Bluetooth => BluetoothTransportFactory?.Invoke(t) ?? throw new NotSupportedException(L.T("Bluetooth is not available on this system.")),
         ConnectionKind.Simulator => SimulatorFactory?.Invoke() ?? new SimulatedRadio(),
         _ => throw new NotSupportedException(),
@@ -161,7 +162,15 @@ public sealed partial class MeshApp : IAsyncDisposable
     {
         SetStatus(reconnectAttempt is null ? LinkStatus.Connecting : LinkStatus.Reconnecting, target.Describe());
         Log.Info("Connection", $"Connecting to {target.Describe()}");
-        var transport = CreateTransport(target);
+        IMeshTransport transport;
+        try { transport = CreateTransport(target); }
+        catch (Exception ex)
+        {
+            // e.g. Bluetooth isn't available: don't leave the status on "Connecting".
+            Log.Warn("Connection", $"Connect failed: {ex.Message}");
+            SetStatus(LinkStatus.Failed, ex.Message);
+            throw;
+        }
         var session = new MeshCoreSession(transport, SessionConfiguration.Default with { ClientIdentifier = "MC1W" });
         session.FrameTraced += (outgoing, frame) => Log.Debug("Frame", $"{(outgoing ? "→" : "←")} {frame.ToHex()}");
         try
@@ -197,6 +206,7 @@ public sealed partial class MeshApp : IAsyncDisposable
                 s.RecentConnections.RemoveAll(r => r.Kind == target.Kind && r.Address == target.Address && r.Port == target.Port);
                 s.RecentConnections.Insert(0, target);
                 if (s.RecentConnections.Count > 8) s.RecentConnections.RemoveRange(8, s.RecentConnections.Count - 8);
+                RememberRadioLink(s, Radio!.Id, target);
             });
             Notify(DataKind.Radio);
             await SyncDeviceTimeAsync(session, ct).ConfigureAwait(false);
@@ -204,6 +214,7 @@ public sealed partial class MeshApp : IAsyncDisposable
             // Event loop first so nothing pushed during sync is lost.
             _eventLoop = Task.Run(() => EventLoopAsync(session, sessionToken));
             await RunInitialSyncAsync(session, ct).ConfigureAwait(false);
+            await RunRadio118ReadyTasksAsync(session, ct).ConfigureAwait(false);
             session.StartAutoMessageFetching();
             session.RequestMessageDrain();
             LastSyncAt = DateTimeOffset.Now;
@@ -220,6 +231,7 @@ public sealed partial class MeshApp : IAsyncDisposable
             if (session.IsRunning)
             {
                 // The link is up; keep it usable even if part of the sync failed.
+                MarkSyncFailed(ex.Message);
                 session.StartAutoMessageFetching();
                 SetStatus(LinkStatus.Ready, L.F("Connected (sync incomplete: {0})", ex.Message));
                 StartBatteryPolling(session);
@@ -300,7 +312,8 @@ public sealed partial class MeshApp : IAsyncDisposable
 
     private void OnSessionStateChanged(MeshCoreSession session, ConnectionState state)
     {
-        if (state.Kind != ConnectionStateKind.Disconnected || !ReferenceEquals(session, Session) || _userDisconnect) return;
+        // A power off that owns this link handles its loss itself (no reconnect).
+        if (state.Kind != ConnectionStateKind.Disconnected || !ReferenceEquals(session, Session) || _userDisconnect || PowerOffOwns(session)) return;
         Log.Warn("Connection", "Radio connection lost");
         _ = Task.Run(async () =>
         {

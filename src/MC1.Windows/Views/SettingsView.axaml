@@ -154,6 +154,8 @@
           <TextBlock Classes="groupname" Text="{l:T 'Connection'}" />
           <Border Classes="group">
             <StackPanel>
+              <!-- The radio's Bluetooth and WiFi links: switch between them -->
+              <ContentControl Content="{Binding Links}" IsVisible="{Binding Links.HasRows}" />
               <ctl:SettingRow Title="{l:T 'Reconnect automatically'}" Hint="{l:T 'If the link drops'}"><ToggleSwitch IsChecked="{Binding AutoReconnect}" /></ctl:SettingRow>
               <ctl:SettingRow Title="{l:T 'Keep running in the tray when closed'}" Hint="{l:T 'Messages keep arriving'}"><ToggleSwitch IsChecked="{Binding MinimizeToTray}" /></ctl:SettingRow>
               <ctl:SettingRow Title="{l:T 'Bluetooth PIN'}" Hint="{l:T 'Default 123456, or the PIN on the radio\'s screen'}">
@@ -161,6 +163,9 @@
               </ctl:SettingRow>
             </StackPanel>
           </Border>
+          <!-- The state's or region's CoreScope: once linked, it gets its own tab in the sidebar -->
+          <TextBlock Classes="groupname" Text="CoreScope" />
+          <ContentControl Content="{Binding CoreScope}" />
         </StackPanel>
 
         <!-- Chats -->
@@ -296,7 +301,7 @@
           <Border Classes="banner" Margin="0,4,0,8" IsVisible="{Binding IsRadioConnected}">
             <Grid ColumnDefinitions="Auto,*,Auto">
               <PathIcon Classes="small" Data="{StaticResource Icon.InformationOutline}" Margin="0,0,10,0" VerticalAlignment="Center" />
-              <TextBlock Grid.Column="1" Text="{l:T 'Disconnect the radio to back up, restore or export.'}" TextWrapping="Wrap" VerticalAlignment="Center" />
+              <TextBlock Grid.Column="1" Text="{l:T 'Disconnect the radio to back up or export. A backup can be restored while connected.'}" TextWrapping="Wrap" VerticalAlignment="Center" />
               <Button Grid.Column="2" Content="{l:T 'Disconnect'}" Margin="10,0,0,0" Command="{Binding DisconnectRadioCommand}" />
             </Grid>
           </Border>
@@ -305,7 +310,7 @@
               <ctl:SettingRow Title="{l:T 'Backup'}" Hint="{l:T 'Messages, contacts, channels, saved paths and settings (.mc1backup)'}" WrapWidth="560">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                   <Button Content="{l:T 'Back up…'}" Command="{Binding BackupAppDataCommand}" IsEnabled="{Binding CanTransfer}" />
-                  <Button Content="{l:T 'Restore…'}" Command="{Binding RestoreAppDataCommand}" IsEnabled="{Binding CanTransfer}" />
+                  <Button Content="{l:T 'Restore…'}" Command="{Binding RestoreAppDataCommand}" IsEnabled="{Binding CanRestore}" />
                 </StackPanel>
               </ctl:SettingRow>
               <ctl:SettingRow Title="{l:T 'App settings'}" Hint="{l:T 'Export as JSON'}">
@@ -361,7 +366,7 @@
                 <TextBlock Classes="hint" TextWrapping="Wrap" Text="{l:T 'A Windows app for MeshCore LoRa mesh radios, over Bluetooth, USB and WiFi.'}" />
                 <WrapPanel Margin="0,4,0,0">
                   <Button Classes="link" Content="meshcore.io" ToolTip.Tip="{l:T 'The official MeshCore website'}" Command="{Binding OpenUrlCommand}" CommandParameter="https://meshcore.io" Margin="0,0,16,0" />
-                  <Button Classes="link" Content="Source code" Command="{Binding OpenUrlCommand}" CommandParameter="https://github.com/Yandi9/Meshcore-App-for-Desktop" Margin="0,0,16,0" />
+                  <Button Classes="link" Content="Source code" Command="{Binding OpenUrlCommand}" CommandParameter="https://github.com/Yandi9/Meshcore-X" Margin="0,0,16,0" />
                   <Button Classes="link" Content="{l:T 'MeshCore on GitHub'}" Command="{Binding OpenUrlCommand}" CommandParameter="https://github.com/meshcore-dev/MeshCore" />
                 </WrapPanel>
               </StackPanel>

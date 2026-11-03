@@ -8,7 +8,11 @@ namespace MC1.Core.Services;
 /// <summary>Channel slots on the radio (public, private and #hashtag channels) and per-channel flood scope.</summary>
 public sealed class ChannelService(MeshApp app)
 {
-    private string _lastPushedScope = "inherit";
+    /// <summary>Held from setting the session flood scope until the message that needs it has been handed to the radio.</summary>
+    private readonly SemaphoreSlim _scopeLock = new(1, 1);
+    /// <summary>The scope this app last set, and on which session (a new session starts unknown).</summary>
+    private string? _lastPushedScope;
+    private MeshCoreSession? _scopeSession;
 
     public IReadOnlyList<ChannelRecord> GetAll() => app.RadioId is { } id ? app.Db.GetChannels(id) : [];
 
@@ -55,7 +59,8 @@ public sealed class ChannelService(MeshApp app)
             try { DeviceDefaultFloodScope = (await session.GetDefaultFloodScopeAsync(ct).ConfigureAwait(false))?.Name; }
             catch (Exception ex) { app.Log.Debug("Channels", "Default flood scope unavailable: " + ex.Message); }
         }
-        _lastPushedScope = "inherit";
+        // The radio's default may have changed: set the scope again before the next send.
+        _lastPushedScope = null;
         app.Log.Info("Channels", $"Channels synced: {received.Count(c => c.IsConfigured)} configured of {max} slots");
         app.Notify(DataKind.Channels);
         app.Notify(DataKind.Conversations);
@@ -77,6 +82,8 @@ public sealed class ChannelService(MeshApp app)
         await session.SetChannelAsync((byte)index, name, secret).ConfigureAwait(false);
         var rec = app.Db.GetChannel(radioId, index) ?? new ChannelRecord { RadioId = radioId, Idx = index };
         var secretChanged = !rec.Secret.SequenceEquals(secret);
+        // Another channel in this slot starts fresh: no unread count, draft, pin, region or notification choice carried over.
+        if (secretChanged) rec = new ChannelRecord { Id = rec.Id, RadioId = radioId, Idx = index };
         rec.Name = name;
         rec.Secret = secret;
         app.Db.UpsertChannel(rec);
@@ -131,7 +138,19 @@ public sealed class ChannelService(MeshApp app)
     public void SetNotificationLevel(ChannelRecord ch, NotificationLevel level)
     {
         ch.NotificationLevel = (int)level;
-        app.Db.UpsertChannel(ch);
+        app.Db.SetChannelNotificationLevel(ch.RadioId, ch.Idx, level);
+        app.Notify(DataKind.Channels);
+        app.Notify(DataKind.Conversations);
+        // Muted chats don't count towards the unread totals.
+        app.Messages.UpdateBadge();
+    }
+
+    /// <summary>Pins or unpins the channel in the chat list (this PC only).</summary>
+    public void SetPinned(ChannelRecord ch, bool pinned)
+    {
+        if (!app.Db.SetChannelPinned(ch.RadioId, ch.Idx, pinned)) throw new MessageServiceException(L.T("Couldn't save the pin. Try again."));
+        ch.IsPinned = pinned;
+        app.Notify(DataKind.Channels);
         app.Notify(DataKind.Conversations);
     }
 
@@ -148,36 +167,102 @@ public sealed class ChannelService(MeshApp app)
     public void SetFloodScope(ChannelRecord ch, string? scope)
     {
         ch.FloodScope = scope is null or "inherit" ? null : scope;
-        app.Db.UpsertChannel(ch);
+        app.Db.SetChannelFloodScope(ch.RadioId, ch.Idx, ch.FloodScope);
         app.Notify(DataKind.Channels);
     }
 
-    /// <summary>Pushes the session flood scope needed before sending on <paramref name="channelIndex"/>.</summary>
+    // MARK: Flood scope for sends
+
+    /// <summary>Firmware before this has no session flood scope: there a reset to the radio's default is skipped.</summary>
+    private const int FloodScopeMinimumFirmware = 8;
+
+    /// <param name="Key">Identifies the scope (to skip setting the same one twice for DMs and rooms).</param>
+    /// <param name="ScopeKey">The region key to set; null with <paramref name="Unscoped"/> false means no command.</param>
+    private sealed record ScopePlan(string Key, byte[]? ScopeKey, bool Unscoped);
+
+    /// <summary>The session flood scope a send on <paramref name="channelIndex"/> needs (null: DMs and room posts use the radio's default).</summary>
+    private ScopePlan PlanScope(int? channelIndex)
+    {
+        var ch = channelIndex is { } idx && app.RadioId is { } rid ? app.Db.GetChannel(rid, idx) : null;
+        var pref = ch?.FloodScope ?? "inherit";
+        var fw = app.Capabilities?.FirmwareVersion ?? 0;
+        if (pref == "all" && fw >= 12) return new("unscoped", null, true);
+        if (pref.StartsWith("region:")) return new(pref, new FloodScope.Region(pref[7..]).ScopeKey(), false);
+        if (pref != "all" && !string.IsNullOrEmpty(DeviceDefaultFloodScope))
+            return new("default:" + DeviceDefaultFloodScope, new FloodScope.Region(DeviceDefaultFloodScope).ScopeKey(), false);
+        // "All regions" before firmware v12, or the radio's own default: reset the session scope.
+        return fw < FloodScopeMinimumFirmware ? new("none", null, false) : new("disabled", new FloodScope.Disabled().ScopeKey(), false);
+    }
+
+    private async Task PushScopeAsync(MeshCoreSession session, ScopePlan plan)
+    {
+        _scopeSession = session;
+        try
+        {
+            if (plan.Unscoped) await session.SetFloodScopeUnscopedAsync().ConfigureAwait(false);
+            else if (plan.ScopeKey is { } key) await session.SetFloodScopeAsync(key).ConfigureAwait(false);
+            _lastPushedScope = plan.Key;
+        }
+        catch
+        {
+            _lastPushedScope = null; // what the radio has now is unknown
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Sets the channel's flood scope (its region, or the radio's default) and then sends, with no other send from this
+    /// app changing the scope in between. Used for every channel message: new ones, retries, reactions and replies
+    /// from a notification. A scope the radio refuses fails the send rather than flooding it outside its region.
+    /// </summary>
+    internal async Task<T> SendChannelScopedAsync<T>(MeshCoreSession session, int channelIndex, Func<Task<T>> send)
+    {
+        await _scopeLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            // Always set it: something else (another app on the radio, a restart) may have changed it.
+            await PushScopeAsync(session, PlanScope(channelIndex)).ConfigureAwait(false);
+            return await send().ConfigureAwait(false);
+        }
+        finally { _scopeLock.Release(); }
+    }
+
+    internal Task SendChannelScopedAsync(MeshCoreSession session, int channelIndex, Func<Task> send) =>
+        SendChannelScopedAsync<bool>(session, channelIndex, async () => { await send().ConfigureAwait(false); return true; });
+
+    /// <summary>Sends a direct message (or other non-channel packet) with the radio's default scope set first.</summary>
+    internal async Task<T> SendDirectScopedAsync<T>(MeshCoreSession session, Func<Task<T>> send)
+    {
+        await _scopeLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await ApplyDefaultScopeLockedAsync(session).ConfigureAwait(false);
+            return await send().ConfigureAwait(false);
+        }
+        finally { _scopeLock.Release(); }
+    }
+
+    /// <summary>Puts the radio's default scope back (before a room post, which waits for its ACK on its own).</summary>
     internal async Task ApplyFloodScopeAsync(int? channelIndex)
     {
         var session = app.Session;
         if (session is null || !session.IsRunning) return;
-        var ch = channelIndex is { } idx ? app.Db.GetChannel(app.RequireRadioId(), idx) : null;
-        var pref = ch?.FloodScope ?? "inherit";
-        var fw = app.Capabilities?.FirmwareVersion ?? 0;
-        string desired;
-        FloodScope? scope = null;
-        var unscoped = false;
-        if (pref == "all") { if (fw >= 12) { desired = "unscoped"; unscoped = true; } else { desired = "disabled"; scope = new FloodScope.Disabled(); } }
-        else if (pref.StartsWith("region:")) { desired = pref; scope = new FloodScope.Region(pref[7..]); }
-        else desired = "inherit";
-        if (desired == _lastPushedScope) return;
+        await _scopeLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (desired == "inherit")
-            {
-                if (!string.IsNullOrEmpty(DeviceDefaultFloodScope)) await session.SetFloodScopeAsync(new FloodScope.Region(DeviceDefaultFloodScope).ScopeKey()).ConfigureAwait(false);
-                else await session.SetFloodScopeAsync(new FloodScope.Disabled().ScopeKey()).ConfigureAwait(false);
-            }
-            else if (unscoped) await session.SetFloodScopeUnscopedAsync().ConfigureAwait(false);
-            else await session.SetFloodScopeAsync(scope!.ScopeKey()).ConfigureAwait(false);
-            _lastPushedScope = desired;
+            if (channelIndex is { } idx) await PushScopeAsync(session, PlanScope(idx)).ConfigureAwait(false);
+            else await ApplyDefaultScopeLockedAsync(session).ConfigureAwait(false);
         }
         catch (Exception ex) { app.Log.Warn("Channels", "Could not set flood scope: " + ex.Message); }
+        finally { _scopeLock.Release(); }
+    }
+
+    private async Task ApplyDefaultScopeLockedAsync(MeshCoreSession session)
+    {
+        var plan = PlanScope(null);
+        if (ReferenceEquals(_scopeSession, session) && plan.Key == _lastPushedScope) return;
+        // Best effort: direct messages mostly travel on a path, where the scope doesn't matter.
+        try { await PushScopeAsync(session, plan).ConfigureAwait(false); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { app.Log.Warn("Channels", "Could not set flood scope: " + ex.Message); }
     }
 }

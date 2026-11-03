@@ -35,8 +35,13 @@ public sealed partial class MeshCoreSession
     public Task<TuningParamsResponse> GetTuningParamsAsync(CancellationToken ct = default) =>
         SendAndWaitWithErrorAsync(PacketBuilder.GetTuningParams(), e => (e as MeshEvent.TuningParamsResponseEvent)?.Response, ct: ct);
 
+    /// <summary>
+    /// Writes the full other-params record and refreshes <see cref="SelfInfo"/>, holding the configuration serializer
+    /// so a concurrent granular setter cannot revert it. Omitting <paramref name="multiAcks"/> keeps the radio's value.
+    /// </summary>
     public Task SetOtherParamsAsync(bool manualAdd, byte telEnv, byte telLoc, byte telBase, byte advLocPolicy, byte? multiAcks = null, CancellationToken ct = default) =>
-        SendSimpleCommandAsync(PacketBuilder.SetOtherParams(manualAdd, telEnv, telLoc, telBase, advLocPolicy, multiAcks), ct);
+        ConfigSerializer.WithSerializationAsync(
+            () => WriteOtherParamsAsync(PacketBuilder.SetOtherParams(manualAdd, telEnv, telLoc, telBase, advLocPolicy, multiAcks), ct), ct);
 
     public Task SetDevicePinAsync(uint pin, CancellationToken ct = default) => SendSimpleCommandAsync(PacketBuilder.SetDevicePin(pin), ct);
 
@@ -47,19 +52,47 @@ public sealed partial class MeshCoreSession
     public Task SetMultiAcksAsync(byte count, CancellationToken ct = default) => MutateOtherParamsAsync(c => c.MultiAcks = count, ct);
     public Task SetAdvertisementLocationPolicyAsync(byte policy, CancellationToken ct = default) => MutateOtherParamsAsync(c => c.AdvertisementLocationPolicy = policy, ct);
 
-    public async Task MutateOtherParamsAsync(Action<OtherParamsConfig> transform, CancellationToken ct = default)
-    {
-        await _otherParamsLock.WaitAsync(ct).ConfigureAwait(false);
-        try
+    /// <summary>Read-modify-write of the other-params record (current values from <see cref="SelfInfo"/>), held under the
+    /// configuration serializer through the write and the cache refresh.</summary>
+    public Task MutateOtherParamsAsync(Action<OtherParamsConfig> transform, CancellationToken ct = default) =>
+        ConfigSerializer.WithSerializationAsync(async () =>
         {
-            SelfInfo ??= await SendAppStartAsync(ct).ConfigureAwait(false);
-            var cfg = OtherParamsConfig.From(SelfInfo);
+            var cfg = await CurrentOtherParamsAsync(ct).ConfigureAwait(false);
             transform(cfg);
-            await SetOtherParamsAsync(cfg.ManualAddContacts, cfg.TelemetryModeEnvironment, cfg.TelemetryModeLocation,
-                cfg.TelemetryModeBase, cfg.AdvertisementLocationPolicy, cfg.MultiAcks, ct).ConfigureAwait(false);
-            SelfInfo = await SendAppStartAsync(ct).ConfigureAwait(false);
-        }
-        finally { _otherParamsLock.Release(); }
+            await WriteOtherParamsAsync(cfg, ct).ConfigureAwait(false);
+        }, ct);
+
+    /// <summary>
+    /// Merges <paramref name="intent"/> into the current other-params record inside the configuration serializer, so the
+    /// caller never reads sibling fields before admission. An empty intent sends nothing; a merge that changes nothing
+    /// sends nothing either. Port of Swift <c>applyOtherParams(_:)</c>.
+    /// </summary>
+    public async Task ApplyOtherParamsAsync(OtherParamsIntent intent, CancellationToken ct = default)
+    {
+        if (intent.IsEmpty) return;
+        await ConfigSerializer.WithSerializationAsync(async () =>
+        {
+            var current = await CurrentOtherParamsAsync(ct).ConfigureAwait(false);
+            var updated = intent.AppliedTo(current);
+            if (updated == current) return;
+            await WriteOtherParamsAsync(updated, ct).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
+    }
+
+    private async Task<OtherParamsConfig> CurrentOtherParamsAsync(CancellationToken ct)
+    {
+        SelfInfo ??= await SendAppStartAsync(ct).ConfigureAwait(false);
+        return OtherParamsConfig.From(SelfInfo ?? throw new MeshCoreException(MeshCoreErrorKind.SessionNotStarted));
+    }
+
+    private Task WriteOtherParamsAsync(OtherParamsConfig cfg, CancellationToken ct) =>
+        WriteOtherParamsAsync(PacketBuilder.SetOtherParams(cfg.ManualAddContacts, cfg.TelemetryModeEnvironment, cfg.TelemetryModeLocation,
+            cfg.TelemetryModeBase, cfg.AdvertisementLocationPolicy, cfg.MultiAcks), ct);
+
+    private async Task WriteOtherParamsAsync(byte[] frame, CancellationToken ct)
+    {
+        await SendSimpleCommandAsync(frame, ct).ConfigureAwait(false);
+        SelfInfo = await SendAppStartAsync(ct).ConfigureAwait(false);
     }
 
     public Task<AutoAddConfig> GetAutoAddConfigAsync(CancellationToken ct = default) =>
@@ -126,6 +159,8 @@ public sealed partial class MeshCoreSession
         SendAndWaitAsync(PacketBuilder.GetStatsPackets(), e => (e as MeshEvent.StatsPackets)?.Stats, ct: ct);
 
     public Task SetFloodScopeAsync(byte[] scopeKey, CancellationToken ct = default) => SendSimpleCommandAsync(PacketBuilder.SetFloodScope(scopeKey), ct);
+    public Task SetFloodScopeAsync(FloodScope scope, CancellationToken ct = default) => SetFloodScopeAsync(scope.ScopeKey(), ct);
+    public Task SetFloodScopeAsync(ResolvedFloodScope scope, CancellationToken ct = default) => SendSimpleCommandAsync(scope.ToCommand(), ct);
     public Task SetFloodScopeUnscopedAsync(CancellationToken ct = default) => SendSimpleCommandAsync(PacketBuilder.SetFloodScopeUnscoped(), ct);
 
     public Task SetDefaultFloodScopeAsync(string name, FloodScope scope, CancellationToken ct = default) =>
@@ -146,16 +181,23 @@ public sealed partial class MeshCoreSession
 
     // MARK: Contacts
 
+    /// <summary>Refreshes the session contact cache when needed (incrementally from its watermark) and returns the
+    /// <b>whole</b> cache, not just the delta.</summary>
     public async Task<IReadOnlyList<MeshContact>> EnsureContactsAsync(bool force = false, CancellationToken ct = default)
     {
         if (force || Contacts.NeedsRefresh || Contacts.IsEmpty)
-            return (await GetContactsAsync(Contacts.LastModified, ct).ConfigureAwait(false)).Contacts;
+            await GetContactsAsync(Contacts.LastModified, ct).ConfigureAwait(false);
         return Contacts.Contacts;
     }
 
-    /// <summary>Streams the radio's contact table (optionally only contacts modified since a watermark).</summary>
-    public Task<ContactFetchResult> GetContactsAsync(DateTimeOffset? since = null, CancellationToken ct = default) =>
-        WithSerialization(async () =>
+    /// <summary>
+    /// Streams the radio's contact table (optionally only contacts modified since a watermark). A complete full fetch
+    /// (no watermark, received count equals the reported total) replaces the cache, pruning contacts that are gone; an
+    /// incomplete full fetch never prunes and forces the next refresh to be a full fetch.
+    /// </summary>
+    public async Task<ContactFetchResult> GetContactsAsync(DateTimeOffset? since = null, CancellationToken ct = default)
+    {
+        var result = await WithSerialization(async () =>
         {
             using var sub = Dispatcher.Subscribe();
             await SendRawAsync(PacketBuilder.GetContacts(since), ct).ConfigureAwait(false);
@@ -164,30 +206,35 @@ public sealed partial class MeshCoreSession
             var started = DateTime.UtcNow;
             while (true)
             {
-                if (DateTime.UtcNow - started > Configuration.ContactStreamHardTimeout) throw MeshCoreException.Timeout();
+                if (DateTime.UtcNow - started > Configuration.ContactStreamHardTimeout) throw StoppedOr(MeshCoreException.Timeout());
                 using var idle = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 idle.CancelAfter(Configuration.ContactStreamInactivityTimeout);
                 MeshEvent e;
                 try
                 {
-                    if (!await sub.Reader.WaitToReadAsync(idle.Token).ConfigureAwait(false)) throw new MeshCoreException(MeshCoreErrorKind.ConnectionLost);
+                    if (!await sub.Reader.WaitToReadAsync(idle.Token).ConfigureAwait(false)) throw StoppedOr(new MeshCoreException(MeshCoreErrorKind.ConnectionLost));
                     if (!sub.Reader.TryRead(out e!)) continue;
                 }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw MeshCoreException.Timeout(); }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw StoppedOr(MeshCoreException.Timeout()); }
                 switch (e)
                 {
                     case MeshEvent.ContactsStart s: total = s.Count; break;
                     case MeshEvent.Contact c: received.Add(c.Value); break;
-                    case MeshEvent.ContactsEnd end:
-                        foreach (var c in received) Contacts.Store(c);
-                        Contacts.MarkClean(end.LastModified);
-                        return new ContactFetchResult(received, total, end.LastModified);
+                    case MeshEvent.ContactsEnd end: return new ContactFetchResult(received, total, end.LastModified);
                     case MeshEvent.Error err: throw MeshCoreException.Device(err.Code);
                     case MeshEvent.ConnectionStateChanged { State.Kind: ConnectionStateKind.Disconnected }:
                         throw new MeshCoreException(MeshCoreErrorKind.ConnectionLost);
                 }
             }
-        }, ct);
+        }, ct).ConfigureAwait(false);
+
+        var complete = since is null && result.ReportedTotal == result.Contacts.Count;
+        if (complete) Contacts.ReplaceCache(result.Contacts);
+        else foreach (var c in result.Contacts) Contacts.Store(c);
+        if (since is null && !complete) Contacts.RequireFullRefresh();
+        else if (result.LastModified is { } modified) Contacts.MarkClean(modified);
+        return result;
+    }
 
     public async Task<MeshContact?> GetContactAsync(byte[] publicKey, CancellationToken ct = default)
     {
@@ -207,10 +254,13 @@ public sealed partial class MeshCoreSession
         return SendSimpleCommandAsync(PacketBuilder.ResetPath(publicKey), ct);
     }
 
-    public Task RemoveContactAsync(byte[] publicKey, CancellationToken ct = default)
+    /// <summary>Removes a contact from the radio; on success it is also dropped from the session cache (a failed
+    /// removal leaves the cache untouched).</summary>
+    public async Task RemoveContactAsync(byte[] publicKey, CancellationToken ct = default)
     {
         RequireFullKey(publicKey, "removeContact");
-        return SendSimpleCommandAsync(PacketBuilder.RemoveContact(publicKey), ct);
+        await SendSimpleCommandAsync(PacketBuilder.RemoveContact(publicKey), ct).ConfigureAwait(false);
+        Contacts.Remove(publicKey.ToHex());
     }
 
     public Task ShareContactAsync(byte[] publicKey, CancellationToken ct = default)
@@ -268,13 +318,31 @@ public sealed partial class MeshCoreSession
                 try { await ResetPathAsync(destination, ct).ConfigureAwait(false); isFlood = true; }
                 catch (Exception) { /* keep trying */ }
             }
-            var sent = await SendMessageAsync(destination.Prefix(6), text, timestamp, (byte)attempts, ct).ConfigureAwait(false);
-            var ackTimeout = timeout ?? TimeSpan.FromMilliseconds(sent.SuggestedTimeoutMs * SessionConfiguration.RetryAckTimeoutMultiplier);
-            var ack = await WaitForEventAsync(e => e is MeshEvent.Acknowledgement a && a.Code.SequenceEquals(sent.ExpectedAck), ackTimeout, ct).ConfigureAwait(false);
-            if (ack is not null) return sent;
+            if (await SendMessageAndAwaitAckAsync(destination.Prefix(6), text, timestamp, (byte)attempts, timeout, ct).ConfigureAwait(false) is { } acked)
+                return acked;
             attempts++;
             if (isFlood) floodAttempts++;
         }
+        return null;
+    }
+
+    /// <summary>Sends one attempt and waits for its ACK. The ACK subscription opens before the send, so an ACK that
+    /// arrives before the send completes is still observed; it is released on every exit path.</summary>
+    private async Task<MessageSentInfo?> SendMessageAndAwaitAckAsync(byte[] destination, string text, DateTimeOffset timestamp, byte attempt,
+        TimeSpan? timeout, CancellationToken ct)
+    {
+        using var acks = Dispatcher.Subscribe(e => e is MeshEvent.Acknowledgement);
+        var sent = await SendMessageAsync(destination, text, timestamp, attempt, ct).ConfigureAwait(false);
+        var ackTimeout = timeout ?? TimeSpan.FromMilliseconds(sent.SuggestedTimeoutMs * SessionConfiguration.RetryAckTimeoutMultiplier);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(ackTimeout);
+        try
+        {
+            await foreach (var e in acks.ReadAllAsync(cts.Token).ConfigureAwait(false))
+                if (e is MeshEvent.Acknowledgement a && a.Code.SequenceEquals(sent.ExpectedAck)) return sent;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+        ct.ThrowIfCancellationRequested();
         return null;
     }
 
@@ -317,17 +385,45 @@ public sealed partial class MeshCoreSession
                 }
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
-            throw MeshCoreException.Timeout();
+            throw StoppedOr(MeshCoreException.Timeout());
         }, ct);
 
+    /// <summary>CLI command to a repeater or room server (<see cref="TextType.CliData"/>).</summary>
     public Task<MessageSentInfo> SendCommandAsync(byte[] destination, string command, DateTimeOffset? timestamp = null, CancellationToken ct = default) =>
         SendAndWaitWithErrorAsync(PacketBuilder.SendCommand(destination, command, timestamp ?? DateTimeOffset.UtcNow), e => (e as MeshEvent.MessageSent)?.Info, ct: ct);
+
+    /// <summary>
+    /// Sends a CLI command message with an explicit text type: <see cref="TextType.CliData"/> for a repeater or room,
+    /// <see cref="TextType.CliCommand"/> for a contact's companion radio (remote CLI; firmware v14+ on <b>both</b> radios, and
+    /// the contact must have granted this radio <see cref="ContactFlags.RemoteCliAllowed"/>). The reply arrives later as a
+    /// <see cref="MeshEvent.ContactMessageReceived"/> with <see cref="TextType.CliData"/>.
+    /// </summary>
+    /// <exception cref="MeshCoreException"><see cref="MeshCoreErrorKind.Unsupported"/> for <see cref="TextType.CliCommand"/> on a
+    /// radio known to be older than v14; <see cref="MeshCoreErrorKind.InvalidInput"/> for a text type that isn't a CLI type.</exception>
+    public async Task<MessageSentInfo> SendCommandAsync(byte[] destination, string command, TextType textType, DateTimeOffset? timestamp = null, CancellationToken ct = default)
+    {
+        if (textType is not (TextType.CliData or TextType.CliCommand))
+            throw new MeshCoreException(MeshCoreErrorKind.InvalidInput, $"{textType} is not a CLI text type");
+        if (textType == TextType.CliCommand) RequireFirmware(DeviceCapabilities.RadioCliFirmwareVersion, "Remote CLI for contact radios");
+        return await SendAndWaitWithErrorAsync(PacketBuilder.SendCommand(destination, command, textType, timestamp ?? DateTimeOffset.UtcNow),
+            e => (e as MeshEvent.MessageSent)?.Info, ct: ct).ConfigureAwait(false);
+    }
 
     public Task SendChannelMessageAsync(byte channel, string text, DateTimeOffset timestamp, CancellationToken ct = default) =>
         SendSimpleCommandAsync(PacketBuilder.SendChannelMessage(channel, text, timestamp), ct);
 
-    public Task SendChannelDataAsync(byte channelIndex, ushort dataType, byte[] payload, CancellationToken ct = default) =>
-        SendSimpleCommandAsync(PacketBuilder.SendChannelData(channelIndex, dataType, payload), ct);
+    /// <summary>Sends a binary channel datagram (firmware v11+).</summary>
+    /// <exception cref="MeshCoreException"><see cref="MeshCoreErrorKind.InvalidInput"/> when the payload exceeds 165 bytes or the
+    /// remaining 176-byte host-frame budget (see <see cref="PacketBuilder.ChannelDataPayloadLimit"/>).</exception>
+    public async Task SendChannelDataAsync(byte channelIndex, ushort dataType, byte[] payload, byte pathLength = PacketBuilder.FloodPathSentinel,
+        byte[]? pathBytes = null, CancellationToken ct = default)
+    {
+        var frame = PacketBuilder.SendChannelData(channelIndex, dataType, payload, pathLength, pathBytes);
+        await SendSimpleCommandAsync(frame, ct).ConfigureAwait(false);
+    }
+
+    public Task SendChannelDataAsync(byte channelIndex, ushort dataType, byte[] payload, CancellationToken ct) =>
+        SendChannelDataAsync(channelIndex, dataType, payload, PacketBuilder.FloodPathSentinel, null, ct);
 
     public Task<MessageSentInfo> SendLoginAsync(byte[] destination, string password, CancellationToken ct = default) =>
         SendAndWaitWithErrorAsync(PacketBuilder.SendLogin(destination, password), e => (e as MeshEvent.MessageSent)?.Info, ct: ct);
@@ -419,15 +515,20 @@ public sealed partial class MeshCoreSession
 
     // MARK: Signing / control
 
-    public async Task<byte[]> SignAsync(byte[] data, int chunkSize = 120, TimeSpan? timeout = null, CancellationToken ct = default)
-    {
-        var max = (int)await SendAndWaitAsync<object>(PacketBuilder.SignStart(), e => e is MeshEvent.SignStart s ? s.MaxLength : null, ct: ct).ConfigureAwait(false);
-        if (data.Length > max) throw new MeshCoreException(MeshCoreErrorKind.DataTooLarge, $"Data too large to sign ({data.Length} > {max})");
-        for (var o = 0; o < data.Length; o += chunkSize)
-            await SendSimpleCommandAsync(PacketBuilder.SignData(data.Slice(o, chunkSize)), ct).ConfigureAwait(false);
-        return await SendAndWaitAsync(PacketBuilder.SignFinish(), e => (e as MeshEvent.Signature)?.Data,
-            timeout ?? TimeSpan.FromTicks(Configuration.DefaultTimeout.Ticks * 3), ct).ConfigureAwait(false);
-    }
+    /// <summary>Signs <paramref name="data"/> with the radio's key. The whole start/data/finish workflow holds the request
+    /// serializer, so two concurrent signing workflows can't interleave their chunks.</summary>
+    public Task<byte[]> SignAsync(byte[] data, int chunkSize = 120, TimeSpan? timeout = null, CancellationToken ct = default) =>
+        WithSerialization(async () =>
+        {
+            var max = await SendAndMatchHoldingSerialization(PacketBuilder.SignStart(),
+                e => e is MeshEvent.SignStart s ? Match<int>.Ok(s.MaxLength) : Match<int>.Skip, null, ct).ConfigureAwait(false);
+            if (data.Length > max) throw new MeshCoreException(MeshCoreErrorKind.DataTooLarge, $"Data too large to sign ({data.Length} > {max})");
+            for (var o = 0; o < data.Length; o += chunkSize)
+                await SendAndMatchHoldingSerialization(PacketBuilder.SignData(data.Slice(o, chunkSize)), OkOrDeviceError, null, ct).ConfigureAwait(false);
+            return await SendAndMatchHoldingSerialization(PacketBuilder.SignFinish(),
+                e => e is MeshEvent.Signature s ? Match<byte[]>.Ok(s.Data) : Match<byte[]>.Skip,
+                timeout ?? TimeSpan.FromTicks(Configuration.DefaultTimeout.Ticks * 3), ct).ConfigureAwait(false);
+        }, ct);
 
     public Task SendControlDataAsync(byte type, byte[] payload, CancellationToken ct = default) =>
         SendSimpleCommandAsync(PacketBuilder.SendControlData(type, payload), ct);

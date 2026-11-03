@@ -60,6 +60,9 @@ public sealed partial class LineOfSightViewModel : ToolPage
     [ObservableProperty] private string _elevationText = "";
 
     private List<ElevationSample>? _raw;
+    /// <summary>The coordinates (A, B) the terrain profile in <see cref="_raw"/> was fetched for.</summary>
+    private (double LatA, double LonA, double LatB, double LonB)? _rawFor;
+    private bool _swapping;
 
     public override void OnShown()
     {
@@ -93,6 +96,34 @@ public sealed partial class LineOfSightViewModel : ToolPage
     partial void OnFrequencyMHzChanged(double value) => Recompute();
     partial void OnRefractionKChanged(double value) => Recompute();
 
+    // Moving a point makes the terrain profile (and a fetch still running) belong to the old route.
+    partial void OnLatAChanged(string value) => PointsEdited();
+    partial void OnLonAChanged(string value) => PointsEdited();
+    partial void OnLatBChanged(string value) => PointsEdited();
+    partial void OnLonBChanged(string value) => PointsEdited();
+
+    private void PointsEdited()
+    {
+        if (_swapping) return;
+        if (_rawFor is { } f && CurrentPoints() is { } p && p == f) return;
+        if (_raw is null && !IsBusy) return;
+        _cts?.Cancel();
+        ClearResult();
+    }
+
+    private (double, double, double, double)? CurrentPoints() =>
+        TryCoord(LatA, -90, 90, out var la) && TryCoord(LonA, -180, 180, out var loa) && TryCoord(LatB, -90, 90, out var lb) && TryCoord(LonB, -180, 180, out var lob)
+            ? (la, loa, lb, lob) : null;
+
+    private void ClearResult()
+    {
+        _raw = null;
+        _rawFor = null;
+        Profile = null;
+        HasResult = false;
+        BearingText = "";
+    }
+
     public void SetPoints((double Lat, double Lon)? from, (double Lat, double Lon) to, string toLabel)
     {
         OnShown();
@@ -114,16 +145,24 @@ public sealed partial class LineOfSightViewModel : ToolPage
     [RelayCommand]
     private void Swap()
     {
-        (NameA, NameB) = (NameB, NameA);
-        (LatA, LatB) = (LatB, LatA);
-        (LonA, LonB) = (LonB, LonA);
-        (HeightA, HeightB) = (HeightB, HeightA);
-        if (_raw is not null)
+        _swapping = true;
+        try
+        {
+            (NameA, NameB) = (NameB, NameA);
+            (LatA, LatB) = (LatB, LatA);
+            (LonA, LonB) = (LonB, LonA);
+            (HeightA, HeightB) = (HeightB, HeightA);
+        }
+        finally { _swapping = false; }
+        if (_raw is not null && _rawFor is { } f)
         {
             var total = _raw[^1].DistanceFromAMeters;
             _raw = _raw.AsEnumerable().Reverse().Select(s => s with { DistanceFromAMeters = total - s.DistanceFromAMeters }).ToList();
+            _rawFor = (f.LatB, f.LonB, f.LatA, f.LonA);
             Recompute();
+            UpdateBearing(_rawFor.Value);
         }
+        else if (IsBusy) { _cts?.Cancel(); ClearResult(); }
     }
 
     [RelayCommand]
@@ -156,36 +195,69 @@ public sealed partial class LineOfSightViewModel : ToolPage
             Status = L.T("Enter valid coordinates for both points (decimal degrees).");
             return;
         }
-        if (RfCalculator.Distance(la, loa, lb, lob) < 10) { Status = L.T("The two points are too close together."); return; }
+        if (!(RfCalculator.Distance(la, loa, lb, lob) >= 10)) { Status = L.T("The two points are too close together."); return; }
+        if (!RfCalculator.IsUsableFrequency(FrequencyMHz)) { Status = L.T("Enter a valid frequency in MHz."); return; }
+        // A newer analysis replaces one still fetching; the old one must not show its result.
         _cts?.Cancel();
-        _cts = new CancellationTokenSource();
+        var cts = new CancellationTokenSource();
+        _cts = cts;
+        ClearResult();
         IsBusy = true;
         Status = L.T("Fetching terrain elevation…");
         try
         {
-            _raw = (await Core.Tools.FetchElevationProfileAsync(la, loa, lb, lob, ct: _cts.Token)).ToList();
+            var profile = (await Core.Tools.FetchElevationProfileAsync(la, loa, lb, lob, ct: cts.Token)).ToList();
+            if (cts.IsCancellationRequested) return;
+            _raw = profile;
+            _rawFor = (la, loa, lb, lob);
             Core.Settings.Update(s => { s.LosHeightA = HeightA; s.LosHeightB = HeightB; s.LosRefractionK = RefractionK; });
-            Recompute();
-            var bearing = Bearing(la, loa, lb, lob);
-            BearingText = $"{bearing:0}° ({Compass(bearing)})";
             Status = null;
+            Recompute();
+            if (HasResult) UpdateBearing(_rawFor.Value);
         }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) { Status = ex.Message; }
-        finally { IsBusy = false; }
+        catch (OperationCanceledException) { if (_cts == cts) Status = null; }
+        catch (Exception ex) { if (_cts == cts) Status = ex.Message; }
+        finally
+        {
+            if (_cts == cts) { IsBusy = false; _cts = null; }
+        }
     }
 
-    /// <summary>Uses an already-fetched elevation profile (e.g. from a test or cache).</summary>
+    private void UpdateBearing((double LatA, double LonA, double LatB, double LonB) p)
+    {
+        var bearing = Bearing(p.LatA, p.LonA, p.LatB, p.LonB);
+        BearingText = $"{bearing:0}° ({Compass(bearing)})";
+    }
+
+    /// <summary>Uses an already-fetched elevation profile (e.g. from a test or cache) for the points now entered.</summary>
     public void ApplyProfile(IReadOnlyList<ElevationSample> profile)
     {
         _raw = profile.ToList();
+        _rawFor = CurrentPoints();
         Recompute();
+        if (HasResult && _rawFor is { } points) UpdateBearing(points);
     }
 
     private void Recompute()
     {
-        if (_raw is not { Count: >= 2 }) return;
+        if (_raw is null) return;
+        if (!RfCalculator.IsUsableFrequency(FrequencyMHz))
+        {
+            // Keep the terrain; the numbers need a frequency.
+            HasResult = false;
+            Status = L.T("Enter a valid frequency in MHz.");
+            return;
+        }
         var result = RfCalculator.Analyze(_raw, HeightA, HeightB, FrequencyMHz, RefractionK);
+        if (!result.IsValid)
+        {
+            // Too little terrain (or none) must not read as a clear — or blocked — path.
+            Profile = null;
+            HasResult = false;
+            Status = L.T("No elevation data returned");
+            return;
+        }
+        if (Status == L.T("Enter a valid frequency in MHz.") || Status == L.T("No elevation data returned")) Status = null;
         Profile = _raw.ToList();
         HasResult = true;
         (Verdict, VerdictColor) = result.ClearanceStatus switch
@@ -199,7 +271,8 @@ public sealed partial class LineOfSightViewModel : ToolPage
         FsplText = $"{result.FreeSpacePathLoss:0.0} dB";
         DiffractionText = $"{result.PeakDiffractionLoss:0.0} dB";
         TotalLossText = $"{result.TotalPathLoss:0.0} dB";
-        ClearanceText = L.F("{0:0}% of first Fresnel zone", result.WorstClearancePercent);
+        // Signed and unclamped, like the iPhone: below 0% the terrain cuts the line of sight.
+        ClearanceText = L.F("{0} of first Fresnel zone", RfCalculator.FormatClearancePercent(result.WorstClearancePercent));
         var min = _raw.Min(s => s.Elevation);
         var max = _raw.Max(s => s.Elevation);
         ElevationText = Metric ? $"{min:0}–{max:0} m" : $"{min * 3.28084:0}–{max * 3.28084:0} ft";

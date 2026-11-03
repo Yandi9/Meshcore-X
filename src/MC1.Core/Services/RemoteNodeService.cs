@@ -11,7 +11,7 @@ public sealed class RemoteNodeException(string message) : Exception(message);
 public sealed record LoginResult(bool Success, bool IsAdmin, RoomPermission Permission, DateTimeOffset? ServerTime);
 
 /// <summary>Repeater and room-server administration: login/keep-alive, status, telemetry, neighbours, CLI.</summary>
-public sealed class RemoteNodeService(MeshApp app)
+public sealed partial class RemoteNodeService(MeshApp app)
 {
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(90);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<LoginResult>> _pendingLogins = new();
@@ -283,6 +283,10 @@ public sealed class RemoteNodeService(MeshApp app)
     public IReadOnlyList<NodeSnapshotRecord> History(ContactRecord contact, TimeSpan window) =>
         app.RadioId is { } id ? app.Db.GetSnapshots(id, contact.PublicKey, Time.Now() - (long)window.TotalMilliseconds) : [];
 
+    /// <summary>The history to chart: <see cref="History"/> without captures holding impossible signal values.</summary>
+    public IReadOnlyList<NodeSnapshotRecord> ChartHistory(ContactRecord contact, TimeSpan window) =>
+        RadioHistoryFilter.Chartable(History(contact, window));
+
     // MARK: CLI
 
     /// <summary>Sends a CLI command to an admin session and waits for the textual reply.</summary>
@@ -301,9 +305,12 @@ public sealed class RemoteNodeService(MeshApp app)
             try
             {
                 var sent = await session.SendCommandAsync(contact.PublicKey, wirePrefix + command, ct: ct).ConfigureAwait(false);
-                var lower = command.Trim().ToLowerInvariant();
-                // The node doesn't answer a reboot; this stands in for its reply (shown to the user, never parsed for data).
-                if (lower == "reboot" || lower.StartsWith("reboot ")) return L.T("Reboot command sent.");
+                // The node doesn't answer a reboot or power off; this stands in for its reply (shown, never parsed for data).
+                switch (RemoteCliNoReply.ForNode(command))
+                {
+                    case RemoteCliNoReplyKind.Reboot: return L.T("Reboot command sent.");
+                    case RemoteCliNoReplyKind.PowerOff: return L.T("Power off command sent.");
+                }
                 var requested = timeout ?? TimeSpan.FromSeconds(10);
                 var fw = TimeSpan.FromMilliseconds(sent.SuggestedTimeoutMs * 2.0);
                 var effective = TimeSpan.FromSeconds(Math.Min(15, Math.Max(requested.TotalSeconds, fw.TotalSeconds)));
@@ -340,7 +347,8 @@ public sealed class RemoteNodeService(MeshApp app)
         if (CliResponse.SplitEchoedPrefix(text) is { } split) { echo = split.Prefix; text = split.Body; }
         if (!_pendingCli.TryGetValue(prefix, out var pending))
         {
-            app.Log.Debug("Remote", $"Unmatched CLI reply from {prefix}: {text}");
+            // The text isn't logged: a radio's reply can hold a WiFi password or a PIN.
+            app.Log.Debug("Remote", $"Unmatched CLI reply from {prefix} ({text.Length} chars)");
             CliOutput?.Invoke(prefix, text);
             return;
         }

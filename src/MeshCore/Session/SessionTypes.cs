@@ -12,6 +12,13 @@ public sealed record SessionConfiguration
     public TimeSpan ChannelPipelineIdleTimeout { get; init; } = TimeSpan.FromSeconds(1.5);
     public TimeSpan ChannelPipelineHardTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>How long to wait for a CLI reply after <c>poweroff</c>. A board that cannot power off replies at once;
+    /// the window covers one round trip. Silence after the frame was handed to the transport counts as powered off.</summary>
+    public TimeSpan PowerOffReplyWindow { get; init; } = TimeSpan.FromSeconds(3);
+
+    /// <summary>How long a failed power-off write may still observe a reply that was already buffered.</summary>
+    public TimeSpan PowerOffBufferedReplyGrace { get; init; } = TimeSpan.FromMilliseconds(50);
+
     public const double BinaryRetransmitRttHeadroom = 2.0;
     public const double RetryAckTimeoutMultiplier = 1.2;
 
@@ -34,6 +41,8 @@ public enum MeshCoreErrorKind
     ConnectionLost,
     SessionNotStarted,
     FeatureDisabled,
+    /// <summary>The radio's firmware is too old for this command (see <see cref="MeshCoreException.MinimumFirmware"/>).</summary>
+    Unsupported,
 }
 
 public sealed class MeshCoreException : Exception
@@ -49,9 +58,18 @@ public sealed class MeshCoreException : Exception
     public byte? DeviceCode { get; }
     public ErrorCode? FirmwareError => DeviceCode is { } c && Enum.IsDefined(typeof(ErrorCode), c) ? (ErrorCode)c : null;
 
+    /// <summary>For <see cref="MeshCoreErrorKind.Unsupported"/>: the companion protocol version the command needs.</summary>
+    public byte? MinimumFirmware { get; init; }
+
+    /// <summary>For radio CLI failures (<see cref="MeshCoreErrorKind.CommandFailed"/> / <see cref="MeshCoreErrorKind.InvalidResponse"/>):
+    /// the radio's reply text, without trailing line endings.</summary>
+    public string? RadioReply { get; init; }
+
     public static MeshCoreException Timeout() => new(MeshCoreErrorKind.Timeout);
     public static MeshCoreException Device(byte? code) => new(MeshCoreErrorKind.DeviceError, deviceCode: code ?? 0);
     public static MeshCoreException NotConnected() => new(MeshCoreErrorKind.NotConnected);
+    public static MeshCoreException Unsupported(byte minimumFirmware, string feature) =>
+        new(MeshCoreErrorKind.Unsupported, $"{feature} needs radio firmware protocol v{minimumFirmware} or newer.") { MinimumFirmware = minimumFirmware };
 
     private static string Describe(MeshCoreErrorKind kind, byte? code) => kind switch
     {
@@ -70,6 +88,8 @@ public sealed class MeshCoreException : Exception
         MeshCoreErrorKind.ConnectionLost => "The connection to the radio was lost.",
         MeshCoreErrorKind.FeatureDisabled => "This feature is disabled on the radio.",
         MeshCoreErrorKind.SessionNotStarted => "The radio session has not started.",
+        MeshCoreErrorKind.Unsupported => "The radio's firmware does not support this feature.",
+        MeshCoreErrorKind.InvalidResponse => "The radio sent an unexpected reply.",
         _ => kind.ToString(),
     };
 }
@@ -113,6 +133,23 @@ public sealed class ContactManager
     }
 
     public void Store(MeshContact c) { lock (_lock) _contacts[c.Id] = c; }
+
+    /// <summary>Replaces the cached contacts with a complete snapshot (pending contacts are kept).</summary>
+    public void ReplaceCache(IEnumerable<MeshContact> contacts)
+    {
+        lock (_lock)
+        {
+            _contacts.Clear();
+            foreach (var c in contacts) _contacts[c.Id] = c;
+        }
+    }
+
+    /// <summary>Drops the watermark so the next refresh is a full fetch.</summary>
+    public void RequireFullRefresh() { lock (_lock) { LastModified = null; NeedsRefresh = true; } }
+
+    /// <summary>Removes a contact (by hex id) from the cached and pending lists.</summary>
+    public void Remove(string id) { lock (_lock) { _contacts.Remove(id); _pending.Remove(id); NeedsRefresh = true; } }
+
     public void MarkClean(DateTimeOffset lastModified) { lock (_lock) { LastModified = lastModified; NeedsRefresh = false; } }
     public void MarkDirty() { lock (_lock) NeedsRefresh = true; }
     public MeshContact? PopPending(string id) { lock (_lock) { _pending.Remove(id, out var c); return c; } }

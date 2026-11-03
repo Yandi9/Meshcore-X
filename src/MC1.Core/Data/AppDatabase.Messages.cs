@@ -335,15 +335,19 @@ public sealed partial class AppDatabase
         return c.QuerySingleOrDefault<RemoteSessionRecord>("SELECT * FROM RemoteSessions WHERE RadioId=@radioId AND PublicKey=@publicKey", new { radioId, publicKey });
     }
 
+    /// <remarks>
+    /// An existing session keeps its chat state (unread count, notifications, draft, pin), which change through their own
+    /// updates, so a session read earlier can't put back older values. Sync and activity times only move forward.
+    /// </remarks>
     public void UpsertRemoteSession(RemoteSessionRecord s)
     {
         using var c = Open();
         c.Execute("""
-            INSERT INTO RemoteSessions(Id,RadioId,PublicKey,Name,IsRoom,IsConnected,Permission,LastSyncTimestamp,UnreadCount,LastActivity,NotificationLevel,LastLogin)
-            VALUES(@Id,@RadioId,@PublicKey,@Name,@IsRoom,@IsConnected,@Permission,@LastSyncTimestamp,@UnreadCount,@LastActivity,@NotificationLevel,@LastLogin)
+            INSERT INTO RemoteSessions(Id,RadioId,PublicKey,Name,IsRoom,IsConnected,Permission,LastSyncTimestamp,UnreadCount,LastActivity,NotificationLevel,LastLogin,IsPinned,DraftText)
+            VALUES(@Id,@RadioId,@PublicKey,@Name,@IsRoom,@IsConnected,@Permission,@LastSyncTimestamp,@UnreadCount,@LastActivity,@NotificationLevel,@LastLogin,@IsPinned,@DraftText)
             ON CONFLICT(Id) DO UPDATE SET Name=excluded.Name, IsRoom=excluded.IsRoom, IsConnected=excluded.IsConnected, Permission=excluded.Permission,
-                LastSyncTimestamp=excluded.LastSyncTimestamp, UnreadCount=excluded.UnreadCount, LastActivity=excluded.LastActivity,
-                NotificationLevel=excluded.NotificationLevel, LastLogin=excluded.LastLogin
+                LastSyncTimestamp=MAX(LastSyncTimestamp, excluded.LastSyncTimestamp), LastActivity=MAX(LastActivity, excluded.LastActivity),
+                LastLogin=excluded.LastLogin
             """, s);
     }
 

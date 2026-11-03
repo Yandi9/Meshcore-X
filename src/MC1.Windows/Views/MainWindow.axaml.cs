@@ -164,6 +164,7 @@ public partial class MainWindow : Window
             Key.D4 => Page.Tools,
             Key.D5 => Page.Radio,
             Key.D6 => Page.Settings,
+            Key.D7 when vm.CoreScope is not null => Page.CoreScope,
             _ => null,
         };
         if (page is { } p) { vm.Navigate(p); e.Handled = true; return; }

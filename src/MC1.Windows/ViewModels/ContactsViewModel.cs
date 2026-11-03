@@ -26,6 +26,11 @@ public sealed class ContactRow
     public bool HasUnread => Contact.UnreadCount > 0;
     public string UnreadText => Contact.UnreadCount > 99 ? "99+" : Contact.UnreadCount.ToString();
     public bool IsFavorite => Contact.IsFavorite;
+    public bool IsBlocked => Contact.IsBlocked;
+    /// <summary>Blocking hides a companion's messages (as on the iPhone, offered for companions).</summary>
+    public bool CanBlock => Contact.ContactType == ContactType.Chat && !Contact.IsBlocked;
+    public bool CanMessage => (Contact.ContactType is ContactType.Chat or ContactType.Room or ContactType.Sensor) && !Contact.IsBlocked;
+    /// <summary>The time the list is sorted by (last advert, or last heard when the advert time is off), as "5 min ago".</summary>
     public string Heard { get; init; } = "";
 }
 
@@ -48,9 +53,41 @@ public sealed partial class ContactsViewModel : ViewModelBase
     public ContactsViewModel(MainWindowViewModel main)
     {
         _main = main;
+        _sortOrder = Enum.IsDefined(Core.Settings.Current.ContactsSortOrder) ? Core.Settings.Current.ContactsSortOrder : NodeSortOrder.LastHeard;
+        _isRadioReady = Core.IsReady;
         _reload = new Debouncer(TimeSpan.FromMilliseconds(200), Reload);
         OnData(c => { if (c.Kind is DataKind.Contacts or DataKind.Discovered or DataKind.Radio) _reload.Trigger(); });
+        // The favourite switch needs the radio (the change is confirmed by it).
+        OnStatus(() => Ui(() =>
+        {
+            IsRadioReady = Core.IsReady;
+            Detail?.UpdateRadioState();
+        }));
     }
+
+    /// <summary>Connected and synced: radio commands (favourite) can run.</summary>
+    [ObservableProperty] private bool _isRadioReady;
+
+    [ObservableProperty] private NodeSortOrder _sortOrder;
+    public bool SortByLastHeard => SortOrder == NodeSortOrder.LastHeard;
+    public bool SortByName => SortOrder == NodeSortOrder.Name;
+    public bool SortByDistance => SortOrder == NodeSortOrder.Distance;
+    public bool SortByHops => SortOrder == NodeSortOrder.Hops;
+
+    partial void OnSortOrderChanged(NodeSortOrder value)
+    {
+        OnPropertyChanged(nameof(SortByLastHeard));
+        OnPropertyChanged(nameof(SortByName));
+        OnPropertyChanged(nameof(SortByDistance));
+        OnPropertyChanged(nameof(SortByHops));
+        Core.Settings.Update(s => s.ContactsSortOrder = value);
+        ApplyFilter();
+    }
+
+    [RelayCommand] private void SetSort(NodeSortOrder order) => SortOrder = order;
+
+    /// <summary>Shown instead of the list when it's empty ("No results for …").</summary>
+    [ObservableProperty] private string? _emptyText;
 
     public ObservableCollection<ContactRow> Contacts { get; } = new();
     public ObservableCollection<DiscoveredRow> Discovered { get; } = new();
@@ -120,10 +157,19 @@ public sealed partial class ContactsViewModel : ViewModelBase
         _blockedSenders = Core.Contacts.BlockedSenders().ToList();
         var max = Core.Capabilities?.MaxContacts ?? Core.Radio?.MaxContacts ?? 0;
         CountText = max > 0 ? L.F("{0} of {1} on radio", _contacts.Count, max) : L.Plural(_contacts.Count, "{0} contact", "{0} contacts");
-        Detail?.Refresh();
+        // The open detail follows the reloaded list; a contact that's gone (removed on the radio) closes it.
+        if (Detail is { } open)
+        {
+            if (_contacts.Any(c => c.Id == open.Contact.Id)) open.Refresh();
+            else { Detail = null; Selected = null; }
+        }
     }
 
     private List<BlockedSenderRecord> _blockedSenders = [];
+
+    /// <summary>The radio's advertised position (for "Distance"), when it has one.</summary>
+    private static (double Lat, double Lon)? SelfLocation =>
+        Core.SelfInfo is { } s && (s.Latitude != 0 || s.Longitude != 0) ? (s.Latitude, s.Longitude) : null;
 
     private void ApplyFilter()
     {
@@ -138,7 +184,12 @@ public sealed partial class ContactsViewModel : ViewModelBase
         BlockedSenders.Clear();
         foreach (var bs in _blockedSenders.Where(b => Matches(b.Name, ""))) BlockedSenders.Add(bs);
         OnPropertyChanged(nameof(HasNoBlocked));
-        var rows = _contacts.Where(c => !c.IsBlocked && TypeFilter != ContactTypeFilter.Blocked).Where(c => TypeFilter switch
+        // Like the Chats list: a search looks through every kind of node and the chip stays as it was.
+        var searching = Search.Length > 0;
+        var now = DateTimeOffset.UtcNow;
+        var candidates = _contacts.Where(c => !c.IsBlocked && TypeFilter != ContactTypeFilter.Blocked).Where(c => searching
+            ? q.Length > 0 && Matches(c.DisplayName, c.PublicKeyHex)
+            : TypeFilter switch
             {
                 ContactTypeFilter.Companions => c.ContactType == ContactType.Chat,
                 ContactTypeFilter.Repeaters => c.ContactType == ContactType.Repeater,
@@ -146,17 +197,20 @@ public sealed partial class ContactsViewModel : ViewModelBase
                 ContactTypeFilter.Sensors => c.ContactType == ContactType.Sensor,
                 ContactTypeFilter.Favorites => c.IsFavorite,
                 _ => true,
-            })
-            .Where(c => q.Length == 0 || c.DisplayName.Contains(q, StringComparison.OrdinalIgnoreCase) || c.PublicKeyHex.StartsWith(q, StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(c => c.IsFavorite).ThenBy(c => c.DisplayName, StringComparer.CurrentCultureIgnoreCase)
+            });
+        var rows = NodeList.Sort(candidates, SortOrder, now, SelfLocation)
             .Select(c => new ContactRow
             {
                 Contact = c,
                 Detail = $"{Formatters.TypeName(c.ContactType)} · {c.RouteDescription}",
-                Heard = Formatters.AgoMs(Math.Max(c.LastHeard, c.LastAdvert * 1000)),
+                Heard = NodeList.TimestampMs(c, now) is { } ms ? Formatters.AgoMs(ms) : "",
             }).ToList();
         Contacts.Clear();
         foreach (var r in rows) Contacts.Add(r);
+        EmptyText = rows.Count > 0 || TypeFilter == ContactTypeFilter.Blocked ? null
+            : searching ? L.F("No results for \"{0}\"", q)
+            : _contacts.Count == 0 ? L.T("No contacts yet.")
+            : L.T("No contacts match this filter.");
         if (selectedId is not null)
         {
             var again = Contacts.FirstOrDefault(c => c.Contact.Id == selectedId);
@@ -225,6 +279,40 @@ public sealed partial class ContactsViewModel : ViewModelBase
 
     [RelayCommand]
     private void UnblockSender(BlockedSenderRecord s) { Core.Contacts.UnblockChannelSender(s.Name); Reload(); }
+
+    // Row context menu (right-click): Message, Block, Favorite, then Remove last.
+
+    [RelayCommand]
+    private void MessageRow(ContactRow row)
+    {
+        if (!row.CanMessage) return;
+        if (row.Contact.ContactType == ContactType.Room) { _ = RoomLoginFlow.JoinAsync(row.Contact); return; }
+        _main.Navigate(Page.Chats);
+        _main.Chats.OpenByKeyForce(MessageService.DmKey(row.Contact.Id));
+    }
+
+    [RelayCommand]
+    private void ToggleBlockRow(ContactRow row)
+    {
+        Core.Contacts.SetBlocked(row.Contact, !row.Contact.IsBlocked);
+        Reload();
+    }
+
+    [RelayCommand]
+    private async Task ToggleFavoriteRow(ContactRow row)
+    {
+        if (!Core.IsReady) return;
+        await Guard(async () => { await Core.Contacts.SetFavoriteAsync(row.Contact, !row.Contact.IsFavorite); Reload(); }, L.T("Favorite"));
+    }
+
+    [RelayCommand]
+    private async Task RemoveRow(ContactRow row)
+    {
+        var c = row.Contact;
+        if (!Core.IsConnected) { await AppHost.Dialogs.ShowError(L.T("Not connected"), L.T("Connect to your radio first.")); return; }
+        if (!await AppHost.Dialogs.Confirm(L.F("Remove {0}?", c.DisplayName), L.T("Removes the contact from your radio. Message history on this PC is deleted too."), L.T("Remove"), true)) return;
+        await Guard(async () => { await Core.Contacts.RemoveAsync(c, deleteMessages: true); Reload(); }, L.T("Remove contact"));
+    }
 }
 
 public sealed partial class ContactDetailViewModel : ViewModelBase
@@ -262,7 +350,20 @@ public sealed partial class ContactDetailViewModel : ViewModelBase
     [ObservableProperty] private bool _shareTelemetryBase;
     [ObservableProperty] private bool _shareTelemetryLocation;
     [ObservableProperty] private bool _shareTelemetryEnvironment;
+    /// <summary>A favourite change is waiting for the radio to confirm it.</summary>
+    [ObservableProperty] private bool _isSettingFavorite;
+    /// <summary>The favourite switch works only while the radio is ready, and not during a change.</summary>
+    [ObservableProperty] private bool _canToggleFavorite;
     public IReadOnlyList<NotificationLevel> Levels { get; } = Enum.GetValues<NotificationLevel>();
+
+    /// <summary>The radio connected, disconnected or finished syncing.</summary>
+    public void UpdateRadioState()
+    {
+        CanToggleFavorite = Core.IsReady && !IsSettingFavorite;
+        UpdateRemoteCliState();
+    }
+
+    partial void OnIsSettingFavoriteChanged(bool value) => UpdateRadioState();
     public string PublicKey => Convert.ToHexString(Contact.PublicKey);
 
     public void Refresh()
@@ -277,6 +378,7 @@ public sealed partial class ContactDetailViewModel : ViewModelBase
         Emoji = Formatters.AvatarEmoji(c.DisplayName);
         IsFavorite = c.IsFavorite;
         IsBlocked = c.IsBlocked;
+        UpdateRadioState();
         CanMessage = c.ContactType is ContactType.Chat or ContactType.Room or ContactType.Sensor;
         CanManage = c.ContactType is ContactType.Repeater or ContactType.Room or ContactType.Sensor;
         IsRoom = c.ContactType == ContactType.Room;
@@ -346,8 +448,21 @@ public sealed partial class ContactDetailViewModel : ViewModelBase
         ActionResult = Telemetry.Count == 0 ? L.T("The node sent no telemetry (it may not share it with you).") : L.Plural(Telemetry.Count, "Telemetry received ({0} value).", "Telemetry received ({0} values).");
     }, e => L.F("Telemetry failed: {0}", e));
 
+    /// <summary>Asks the radio to change the favourite; the star changes only once the radio confirmed it.</summary>
     [RelayCommand]
-    private async Task ToggleFavorite() => await Run(() => Core.Contacts.SetFavoriteAsync(Contact, !Contact.IsFavorite), e => L.F("Favorite failed: {0}", e));
+    private async Task ToggleFavorite()
+    {
+        if (!Core.IsReady || IsSettingFavorite) return;
+        IsSettingFavorite = true;
+        ActionResult = null;
+        try { await Core.Contacts.SetFavoriteAsync(Contact, !Contact.IsFavorite); }
+        catch (Exception ex) { ActionResult = L.F("Favorite failed: {0}", ex.Message); }
+        finally
+        {
+            IsSettingFavorite = false;
+            Refresh();
+        }
+    }
 
     [RelayCommand]
     private async Task SaveTelemetryPermissions() => await Run(async () =>
@@ -379,16 +494,25 @@ public sealed partial class ContactDetailViewModel : ViewModelBase
     private async Task DiscoverPath() => await Run(async () =>
     {
         ActionResult = L.T("Discovering path…");
-        var tcs = new TaskCompletionSource<PathInfo>();
-        void Handler(ContactRecord c, PathInfo p) { if (c.Id == Contact.Id) tcs.TrySetResult(p); }
-        Core.Contacts.PathDiscovered += Handler;
+        // Null: saved on the radio; otherwise why the radio didn't take it.
+        var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Saved(ContactRecord c, PathInfo p) { if (c.Id == Contact.Id) tcs.TrySetResult(null); }
+        void Failed(ContactRecord c, PathInfo p, string error) { if (c.Id == Contact.Id) tcs.TrySetResult(error); }
+        Core.Contacts.PathDiscovered += Saved;
+        Core.Contacts.PathDiscoveryFailed += Failed;
         try
         {
             await Core.Contacts.DiscoverPathAsync(Contact);
             var done = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(30)));
-            ActionResult = done == tcs.Task ? L.T("Path updated.") : L.T("No path response yet (it may still arrive).");
+            ActionResult = done != tcs.Task ? L.T("No path response yet (it may still arrive).")
+                : tcs.Task.Result is { } error ? L.F("A path was found, but the radio didn't save it: {0}", error)
+                : L.T("Path updated.");
         }
-        finally { Core.Contacts.PathDiscovered -= Handler; }
+        finally
+        {
+            Core.Contacts.PathDiscovered -= Saved;
+            Core.Contacts.PathDiscoveryFailed -= Failed;
+        }
     }, e => L.F("Discover path failed: {0}", e));
 
     [RelayCommand]

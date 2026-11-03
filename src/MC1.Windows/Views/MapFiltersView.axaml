@@ -1,0 +1,86 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:l="using:MC1.Windows.Localization"
+             xmlns:vm="using:MC1.Windows.ViewModels"
+             x:Class="MC1.Windows.Views.MapFiltersView"
+             x:DataType="vm:MapFiltersViewModel">
+  <DockPanel>
+    <Border DockPanel.Dock="Bottom" BorderBrush="{DynamicResource App.Border}" BorderThickness="0,1,0,0" Padding="20,10">
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <Button Content="{l:T 'Reset'}" Command="{Binding ResetCommand}" IsEnabled="{Binding CanReset}" />
+        <Button Grid.Column="2" Classes="accent" Content="{l:T 'Done'}" Command="{Binding DoneCommand}" IsDefault="True" />
+      </Grid>
+    </Border>
+    <ScrollViewer>
+      <StackPanel Margin="20,12,20,16" Spacing="6">
+        <TextBlock Classes="hint" Text="{l:T 'The map updates as you change these. Nodes must pass every filter that is on.'}" TextWrapping="Wrap" />
+
+        <!-- Last heard -->
+        <TextBlock Classes="section" Text="{l:T 'LAST HEARD'}" />
+        <Border Classes="group" Padding="14,10">
+          <StackPanel Spacing="8">
+            <ItemsControl ItemsSource="{Binding LastHeardPresets}">
+              <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:MapFilterPreset">
+                  <ToggleButton Classes="chip" Content="{Binding Label}" IsChecked="{Binding IsSelected, Mode=OneWay}" Margin="0,0,6,6"
+                                Command="{Binding $parent[UserControl].((vm:MapFiltersViewModel)DataContext).SelectPresetCommand}" CommandParameter="{Binding}" />
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <Grid ColumnDefinitions="110,*,Auto" RowDefinitions="Auto,Auto" RowSpacing="6">
+              <TextBlock Text="{l:T 'Minimum'}" VerticalAlignment="Center" />
+              <NumericUpDown Grid.Column="1" Value="{Binding MinAge}" Minimum="{Binding DurationMinimum}" Maximum="{Binding DurationMaximum}"
+                             Increment="1" FormatString="0" Watermark="{l:T 'No limit'}" AllowSpin="True" />
+              <ComboBox Grid.Column="2" ItemsSource="{Binding Units}" SelectedItem="{Binding MinUnit}" Margin="8,0,0,0" MinWidth="110"
+                        ToolTip.Tip="{l:T 'Unit'}">
+                <ComboBox.ItemTemplate>
+                  <DataTemplate x:DataType="vm:MapDurationUnitOption"><TextBlock Text="{Binding Name}" /></DataTemplate>
+                </ComboBox.ItemTemplate>
+              </ComboBox>
+              <TextBlock Grid.Row="1" Text="{l:T 'Maximum'}" VerticalAlignment="Center" />
+              <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding MaxAge}" Minimum="{Binding DurationMinimum}" Maximum="{Binding DurationMaximum}"
+                             Increment="1" FormatString="0" Watermark="{l:T 'No limit'}" AllowSpin="True" />
+              <ComboBox Grid.Row="1" Grid.Column="2" ItemsSource="{Binding Units}" SelectedItem="{Binding MaxUnit}" Margin="8,0,0,0" MinWidth="110"
+                        ToolTip.Tip="{l:T 'Unit'}">
+                <ComboBox.ItemTemplate>
+                  <DataTemplate x:DataType="vm:MapDurationUnitOption"><TextBlock Text="{Binding Name}" /></DataTemplate>
+                </ComboBox.ItemTemplate>
+              </ComboBox>
+            </Grid>
+          </StackPanel>
+        </Border>
+        <TextBlock Classes="caption" Text="{Binding LastHeardSummary}" TextWrapping="Wrap" Margin="4,0" />
+        <TextBlock Classes="hint" Text="{l:T 'Based on adverts, messages, and pings received from each node. Nodes never heard are hidden while this filter is on.'}"
+                   TextWrapping="Wrap" Margin="4,0" />
+
+        <!-- Hops -->
+        <TextBlock Classes="section" Text="{l:T 'HOPS'}" />
+        <Border Classes="group" Padding="14,10">
+          <StackPanel Spacing="8">
+            <ItemsControl ItemsSource="{Binding HopPresets}">
+              <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:MapFilterPreset">
+                  <ToggleButton Classes="chip" Content="{Binding Label}" IsChecked="{Binding IsSelected, Mode=OneWay}" Margin="0,0,6,6"
+                                Command="{Binding $parent[UserControl].((vm:MapFiltersViewModel)DataContext).SelectPresetCommand}" CommandParameter="{Binding}" />
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <Grid ColumnDefinitions="110,*" RowDefinitions="Auto,Auto" RowSpacing="6">
+              <TextBlock Text="{l:T 'Minimum'}" VerticalAlignment="Center" />
+              <NumericUpDown Grid.Column="1" Value="{Binding MinHops}" Minimum="0" Maximum="{Binding HopMaximum}" Increment="1" FormatString="0"
+                             Watermark="0" AllowSpin="True" />
+              <TextBlock Grid.Row="1" Text="{l:T 'Maximum'}" VerticalAlignment="Center" />
+              <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding MaxHops}" Minimum="0" Maximum="{Binding HopMaximum}" Increment="1" FormatString="0"
+                             Watermark="{l:T 'No limit'}" AllowSpin="True" />
+            </Grid>
+          </StackPanel>
+        </Border>
+        <TextBlock Classes="caption" Text="{Binding HopsSummary}" TextWrapping="Wrap" Margin="4,0" />
+        <TextBlock Classes="hint" Text="{l:T 'Hops are the repeaters between you and the node; 0 means heard directly. Nodes with an unknown hop count are hidden while this filter is on.'}"
+                   TextWrapping="Wrap" Margin="4,0" />
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</UserControl>

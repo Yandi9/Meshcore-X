@@ -56,7 +56,20 @@
             <Button.Flyout>
               <MenuFlyout>
                 <MenuItem Header="{l:T 'Conversation details'}" Command="{Binding OpenInfoCommand}" />
+                <MenuItem Header="{l:T 'Pin'}" Command="{Binding TogglePinCommand}" IsVisible="{Binding !IsPinned}">
+                  <MenuItem.Icon><PathIcon Classes="small" Data="{StaticResource Icon.PinOutline}" /></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="{l:T 'Unpin'}" Command="{Binding TogglePinCommand}" IsVisible="{Binding IsPinned}">
+                  <MenuItem.Icon><PathIcon Classes="small" Data="{StaticResource Icon.Pin}" /></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="{l:T 'Mark as unread'}" Command="{Binding MarkUnreadCommand}" IsVisible="{Binding !IsMarkedUnread}">
+                  <MenuItem.Icon><PathIcon Classes="small" Data="{StaticResource Icon.EmailOutline}" /></MenuItem.Icon>
+                </MenuItem>
+                <MenuItem Header="{l:T 'Mark as read'}" Command="{Binding MarkReadCommand}" IsVisible="{Binding IsMarkedUnread}">
+                  <MenuItem.Icon><PathIcon Classes="small" Data="{StaticResource Icon.CheckAll}" /></MenuItem.Icon>
+                </MenuItem>
                 <MenuItem Header="{l:T 'Background &amp; colours…'}" Command="{Binding CustomizeAppearanceCommand}" />
+                <Separator />
                 <MenuItem Header="{l:T 'Clear history…'}" Command="{Binding ClearHistoryCommand}" />
               </MenuFlyout>
             </Button.Flyout>

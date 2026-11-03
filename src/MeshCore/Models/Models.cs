@@ -20,6 +20,9 @@ public enum ContactFlags : byte
     TelemetryLocation = 0x04,
     TelemetryEnvironment = 0x08,
     TelemetryAll = TelemetryBase | TelemetryLocation | TelemetryEnvironment,
+    /// <summary>Remote CLI permission (bit 4): this contact may run CLI commands on our radio
+    /// (firmware <c>isRemoteCLIAllowed</c>, v14+).</summary>
+    RemoteCliAllowed = 0x10,
 }
 
 /// <summary>A contact record as stored on the companion radio.</summary>
@@ -76,8 +79,16 @@ public sealed record DeviceCapabilities(
     bool ClientRepeat = false,
     byte PathHashMode = 0)
 {
+    /// <summary>First companion protocol version with <c>CMD_RUN_CLI_COMMAND</c>, power off and remote CLI (firmware 1.18.0).</summary>
+    public const byte RadioCliFirmwareVersion = 14;
+
     public int HashSize => PathHashMode + 1;
     public bool SupportsPathHashMode => FirmwareVersion >= 10;
+    /// <summary>Unscoped flood sends that override the radio's default scope (v12+).</summary>
+    public bool SupportsUnscopedFloodSend => FirmwareVersion >= 12;
+    /// <summary>The radio accepts <see cref="CommandCode.RunCliCommand"/> (radio CLI, WiFi settings, timezone, power off)
+    /// and <see cref="TextType.CliCommand"/> messages for contact radios. Firmware v14+ (1.18.0).</summary>
+    public bool SupportsRadioCli => FirmwareVersion >= RadioCliFirmwareVersion;
 }
 
 public sealed record BatteryInfo(int Level, int? UsedStorageKB = null, int? TotalStorageKB = null);
@@ -234,6 +245,26 @@ public abstract record FloodScope
         RawKey r => r.Key.PaddedOrTruncated(16),
         Region g => SHA256.HashData(Encoding.UTF8.GetBytes(g.Name.StartsWith('#') ? g.Name : "#" + g.Name)).Prefix(16),
         _ => new byte[16],
+    };
+}
+
+/// <summary>
+/// The flood scope a channel send applies first. A zero-key <see cref="FloodScope.Disabled"/> scope uses the radio's
+/// persisted default; <see cref="Unscoped"/> overrides that default so packets carry no region.
+/// </summary>
+public abstract record ResolvedFloodScope
+{
+    /// <summary>Force unscoped floods, overriding the radio's default. Requires firmware v12+.</summary>
+    public sealed record Unscoped : ResolvedFloodScope;
+
+    /// <summary>Set the session's flood scope, or reset it with <see cref="FloodScope.Disabled"/>.</summary>
+    public sealed record Scope(FloodScope Value) : ResolvedFloodScope;
+
+    public byte[] ToCommand() => this switch
+    {
+        Unscoped => PacketBuilder.SetFloodScopeUnscoped(),
+        Scope s => PacketBuilder.SetFloodScope(s.Value.ScopeKey()),
+        _ => PacketBuilder.SetFloodScope(new byte[16]),
     };
 }
 

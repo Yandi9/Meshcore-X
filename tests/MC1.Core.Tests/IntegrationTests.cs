@@ -55,7 +55,7 @@ public sealed class AppFixture : IAsyncDisposable
     }
 }
 
-public class IntegrationTests(ITestOutputHelper output)
+public partial class IntegrationTests(ITestOutputHelper output)
 {
     [Fact]
     public async Task ConnectSyncsContactsChannelsAndQueuedMessages()

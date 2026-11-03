@@ -3,11 +3,12 @@ using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MC1.Core.Services;
+using MC1.Core.Utilities;
 using MC1.Windows.Services;
 
 namespace MC1.Windows.ViewModels;
 
-public enum Page { Chats, Contacts, Map, Tools, Radio, Settings }
+public enum Page { Chats, Contacts, Map, Tools, Radio, Settings, CoreScope }
 
 public sealed partial class NavItem(Page page, string label, string iconKey) : ObservableObject
 {
@@ -31,20 +32,24 @@ public sealed partial class MainWindowViewModel : ViewModelBase
         Radio = new RadioViewModel(this);
         Settings = new SettingsViewModel(this);
         NavItems =
-        [
+        new ObservableCollection<NavItem>([
             new(Page.Chats, L.T("Chats"), "Icon.ChatOutline"),
             new(Page.Contacts, L.T("Contacts"), "Icon.AccountMultipleOutline"),
             new(Page.Map, L.T("Map"), "Icon.MapOutline"),
             new(Page.Tools, L.T("Tools"), "Icon.ToolboxOutline"),
             new(Page.Radio, L.T("Radio"), "Icon.RadioTower"),
             new(Page.Settings, L.T("Settings"), "Icon.CogOutline"),
-        ];
+        ]);
         _selectedNav = NavItems[0];
         _navCollapsed = Core.Settings.Current.NavCollapsed;
         _currentPage = Chats;
         _statusRefresh = new Debouncer(TimeSpan.FromMilliseconds(80), RefreshStatus);
         OnStatus(_statusRefresh.Trigger);
         OnData(c => { if (c.Kind is DataKind.Radio or DataKind.Conversations) _statusRefresh.Trigger(); });
+        Action settingsChanged = () => Ui(SyncCoreScope);
+        Core.Settings.Changed += settingsChanged;
+        Track(() => Core.Settings.Changed -= settingsChanged);
+        SyncCoreScope();
         RefreshStatus();
     }
 
@@ -54,7 +59,61 @@ public sealed partial class MainWindowViewModel : ViewModelBase
     public ToolsViewModel Tools { get; }
     public RadioViewModel Radio { get; }
     public SettingsViewModel Settings { get; }
-    public IReadOnlyList<NavItem> NavItems { get; }
+    /// <summary>The sidebar's pages; CoreScope is there only while a CoreScope link is saved.</summary>
+    public ObservableCollection<NavItem> NavItems { get; }
+
+    /// <summary>The CoreScope tab, while a link is saved (null otherwise).</summary>
+    public CoreScopeViewModel? CoreScope { get; private set; }
+
+    /// <summary>The CoreScope page once it has been opened: kept on screen (hidden) so its browser isn't reloaded.</summary>
+    [ObservableProperty] private CoreScopeViewModel? _coreScopePage;
+
+    /// <summary>The page in the main area; null while CoreScope (which has its own, persistent area) is shown.</summary>
+    public ViewModelBase? PageContent => CurrentPage is CoreScopeViewModel ? null : CurrentPage;
+    public bool IsCoreScopeShown => CurrentPage is CoreScopeViewModel;
+
+    partial void OnCurrentPageChanged(ViewModelBase value)
+    {
+        OnPropertyChanged(nameof(PageContent));
+        OnPropertyChanged(nameof(IsCoreScopeShown));
+        if (CoreScope is { } cs) cs.IsShown = value == cs;
+    }
+
+    /// <summary>Adds, updates or removes the CoreScope tab to match the saved link.</summary>
+    private void SyncCoreScope()
+    {
+        var s = Core.Settings.Current;
+        var item = NavItems.FirstOrDefault(n => n.Page == Page.CoreScope);
+        if (s.CoreScopeUrl is not { } url)
+        {
+            if (item is null) return;
+            if (SelectedNav == item) Navigate(Page.Settings);
+            NavItems.Remove(item);
+            CoreScopePage = null;
+            CoreScope = null;
+            OnPropertyChanged(nameof(CoreScope));
+            return;
+        }
+        if (CoreScope is null)
+        {
+            CoreScope = new CoreScopeViewModel(this, url, s.CoreScopeName);
+            OnPropertyChanged(nameof(CoreScope));
+        }
+        else CoreScope.SetLink(url, s.CoreScopeName);
+        if (item is null)
+        {
+            // Next to the map: it's the mesh as the region's observers hear it.
+            var at = NavItems.IndexOf(NavItems.First(n => n.Page == Page.Map)) + 1;
+            NavItems.Insert(at, new NavItem(Page.CoreScope, CoreScopeLink.DefaultName, "Icon.MonitorDashboard"));
+        }
+    }
+
+    /// <summary>Settings ▸ General, where the CoreScope link is.</summary>
+    public void OpenCoreScopeSettings()
+    {
+        Navigate(Page.Settings);
+        Settings.ShowCategory("general");
+    }
 
     [ObservableProperty] private NavItem _selectedNav;
 
@@ -102,8 +161,10 @@ public sealed partial class MainWindowViewModel : ViewModelBase
             Page.Map => Map,
             Page.Tools => Tools,
             Page.Radio => Radio,
+            Page.CoreScope when CoreScope is { } cs => cs,
             _ => Settings,
         };
+        if (CurrentPage is CoreScopeViewModel shown) CoreScopePage = shown;
         Chats.SetVisible(value.Page == Page.Chats);
         if (value.Page == Page.Map) Map.OnShown();
         if (value.Page == Page.Contacts) Contacts.Reload();
@@ -112,7 +173,8 @@ public sealed partial class MainWindowViewModel : ViewModelBase
         if (value.Page == Page.Tools && Tools.Current is ToolPage tp) tp.OnShown();
     }
 
-    public void Navigate(Page page) => SelectedNav = NavItems.First(n => n.Page == page);
+    public void Navigate(Page page) =>
+        SelectedNav = NavItems.FirstOrDefault(n => n.Page == page) ?? NavItems.First(n => n.Page == Page.Settings);
 
     partial void OnUnreadTotalChanged(int value) => AppHost.UnreadChanged?.Invoke(value);
 
@@ -137,6 +199,10 @@ public sealed partial class MainWindowViewModel : ViewModelBase
         ShowReconnecting = c.Status == LinkStatus.Reconnecting;
         (StatusText, StatusIcon) = c.Status switch
         {
+            // Like the iPhone app: "Sync failed" for a while when part of the sync failed (the link still works), then
+            // "Ready" briefly once the radio's queued messages are in, then the connection.
+            LinkStatus.Ready when RecentFor(c.SyncFailedAt, SyncFailedShown) => (L.T("Sync failed"), "Icon.SyncAlert"),
+            LinkStatus.Ready when RecentFor(c.LastSyncAt, ReadyShown) => (L.T("Ready"), "Icon.CheckCircle"),
             LinkStatus.Ready => (c.CurrentTarget?.Describe() ?? L.T("Connected"), c.CurrentTarget?.Kind switch
             {
                 ConnectionKind.Bluetooth => "Icon.Bluetooth",
@@ -145,6 +211,8 @@ public sealed partial class MainWindowViewModel : ViewModelBase
                 _ => "Icon.CellphoneLink",
             }),
             LinkStatus.Connecting => (c.StatusDetail is null ? L.T("Connecting…") : L.F("Connecting… {0}", c.StatusDetail), "Icon.Sync"),
+            // A short catch-up keeps showing "Syncing…" so "Syncing messages…" doesn't flash.
+            LinkStatus.Syncing when c.Sync?.Phase == "Messages" && RecentFor(c.MessageSyncStartedAt, MessageSyncLabelDelay) => (L.T("Syncing…"), "Icon.Sync"),
             LinkStatus.Syncing => (SyncingText(c.Sync?.Phase), "Icon.Sync"),
             LinkStatus.Reconnecting => (c.StatusDetail ?? L.T("Reconnecting…"), "Icon.SyncAlert"),
             LinkStatus.Failed => (L.F("Connection failed: {0}", c.StatusDetail ?? ""), "Icon.AlertCircleOutline"),
@@ -180,7 +248,21 @@ public sealed partial class MainWindowViewModel : ViewModelBase
             Dispatcher.UIThread.Post(() => _ = OfferPendingWriteAsync(), DispatcherPriority.Background);
         }
         NavItems[0].Badge = UnreadTotal;
-        NavItems[4].Alert = c.Status is LinkStatus.Failed or LinkStatus.Reconnecting || ContactsFull;
+        NavItems.First(n => n.Page == Page.Radio).Alert = c.Status is LinkStatus.Failed or LinkStatus.Reconnecting || ContactsFull;
+    }
+
+    private static readonly TimeSpan MessageSyncLabelDelay = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan ReadyShown = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SyncFailedShown = TimeSpan.FromSeconds(7);
+
+    /// <summary>True while <paramref name="since"/> is less than <paramref name="window"/> ago; the status is refreshed when it ends.</summary>
+    private bool RecentFor(DateTimeOffset? since, TimeSpan window)
+    {
+        if (since is not { } t) return false;
+        var left = t + window - DateTimeOffset.Now;
+        if (left <= TimeSpan.Zero) return false;
+        _ = Task.Delay(left + TimeSpan.FromMilliseconds(30)).ContinueWith(_ => _statusRefresh.Trigger(), TaskScheduler.Default);
+        return true;
     }
 
     /// <summary>"Syncing contacts…": the core's phase names ("Contacts", "Channels", "Messages") stay English data.</summary>

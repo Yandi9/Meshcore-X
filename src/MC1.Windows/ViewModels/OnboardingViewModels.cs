@@ -218,18 +218,16 @@ public sealed partial class RadioSetupViewModel : ViewModelBase
     {
         var core = Core;
         var s = core.SelfInfo;
-        Presets = RadioPresets.PresetsForCurrentLocale();
+        Area = new PresetAreaPicker();
+        _presets = RadioPresets.PresetsFor(Area.Selection);
         _originalName = s?.Name ?? "";
         _name = _originalName;
         _current = core.Device.CurrentPreset();
-        string? country = null;
-        try { country = RegionInfo.CurrentRegion.TwoLetterISORegionName; } catch { /* invariant */ }
-        var recommended = RadioPresets.RecommendedFor(country) is { } id ? Presets.FirstOrDefault(p => p.Id == id) : null;
-        _selectedPreset = _current is { } c ? Presets.FirstOrDefault(p => p.Id == c.Id) : recommended;
+        var recommended = Area.Recommended is { } r ? _presets.FirstOrDefault(p => p.Id == r.Id) : null;
+        _selectedPreset = _current is { } c ? _presets.FirstOrDefault(p => p.Id == c.Id) : recommended;
         CurrentText = s is null ? "" : L.F("On the radio now: {0}", RadioPresets.Describe(_current, s.RadioFrequency, s.RadioBandwidth, s.RadioSpreadingFactor, s.RadioCodingRate));
-        RecommendedText = _current is null && recommended is not null
-            ? L.F("{0} is the usual preset where you are. Everyone you talk to must use the same one.", recommended.Name)
-            : L.T("Everyone you talk to must use the same preset.");
+        _recommendedText = RecommendationSentence(recommended);
+        Area.Changed += OnAreaChanged;
         if (s is not null && (s.Latitude != 0 || s.Longitude != 0))
         {
             _latitude = s.Latitude;
@@ -239,13 +237,45 @@ public sealed partial class RadioSetupViewModel : ViewModelBase
         UpdateLocationText();
     }
 
-    public IReadOnlyList<RadioPreset> Presets { get; }
+    /// <summary>Where the user is: picks the recommended preset (Canada: British Columbia → "Canada: BC").</summary>
+    public PresetAreaPicker Area { get; }
     public string CurrentText { get; }
-    public string RecommendedText { get; }
     public Action? Close { get; set; }
 
+    [ObservableProperty] private IReadOnlyList<RadioPreset> _presets;
+    [ObservableProperty] private string _recommendedText;
     [ObservableProperty] private string _name;
     [ObservableProperty] private RadioPreset? _selectedPreset;
+
+    /// <summary>The user chose a preset themselves (a new area then doesn't replace it).</summary>
+    private bool _presetPicked;
+    private bool _reordering;
+
+    private string RecommendationSentence(RadioPreset? recommended) => _current is null && recommended is not null
+        ? L.F("{0} is the usual preset where you are. Everyone you talk to must use the same one.", recommended.Name)
+        : L.T("Everyone you talk to must use the same preset.");
+
+    partial void OnSelectedPresetChanged(RadioPreset? value)
+    {
+        if (!_reordering && value is not null) _presetPicked = true;
+    }
+
+    /// <summary>Another country or province: list its presets first and pre-select its recommendation.</summary>
+    private void OnAreaChanged()
+    {
+        var keep = SelectedPreset?.Id;
+        _reordering = true;
+        try
+        {
+            Presets = RadioPresets.PresetsFor(Area.Selection);
+            var recommended = Area.Recommended is { } r ? Presets.FirstOrDefault(p => p.Id == r.Id) : null;
+            SelectedPreset = !_presetPicked && _current is null && recommended is not null
+                ? recommended
+                : Presets.FirstOrDefault(p => p.Id == keep);
+            RecommendedText = RecommendationSentence(recommended);
+        }
+        finally { _reordering = false; }
+    }
     [ObservableProperty] private bool _sharePosition;
     [ObservableProperty] private bool _sendAdvert = true;
     [ObservableProperty] private string _locationText = "";
@@ -272,6 +302,7 @@ public sealed partial class RadioSetupViewModel : ViewModelBase
         Message = null;
     }
 
+    /// <summary>"Skip for now": finishes the set-up without changing the radio (as on the iPhone).</summary>
     [RelayCommand] private void Skip() => Close?.Invoke();
 
     [RelayCommand]

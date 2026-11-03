@@ -227,7 +227,9 @@ public sealed class NodeConfigService(MeshApp app)
             pathLen = PathEncoding.Encode(mode + 1, path.Length / (mode + 1));
         }
         var type = Enum.IsDefined(typeof(ContactType), c.Type) ? (ContactType)c.Type : ContactType.Chat;
-        return new MeshContact(key, type, c.Type, (ContactFlags)c.Flags, pathLen, path, c.Name,
+        // A shared backup or config file must never grant remote CLI on this radio (like the iPhone app).
+        var flags = (ContactFlags)c.Flags & ~ContactFlags.RemoteCliAllowed;
+        return new MeshContact(key, type, c.Type, flags, pathLen, path, c.Name,
             DateTimeOffset.FromUnixTimeSeconds(c.LastAdvert), ParseDouble(c.Latitude), ParseDouble(c.Longitude), DateTimeOffset.FromUnixTimeSeconds(c.LastModified));
     }
 }

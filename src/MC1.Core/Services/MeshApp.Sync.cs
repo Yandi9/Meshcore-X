@@ -12,9 +12,33 @@ public sealed partial class MeshApp
 
     public bool IsInitialSyncRunning => _initialSyncRunning;
 
+    /// <summary>
+    /// When the catch-up of messages the radio queued while the app was away started (null when not catching up).
+    /// The app counts as ready only after it; the status line shows "Syncing messages…" during it.
+    /// </summary>
+    public DateTimeOffset? MessageSyncStartedAt { get; private set; }
+
+    /// <summary>When the last sync (on connecting, or a manual resync) failed with the link still up, and why.</summary>
+    public DateTimeOffset? SyncFailedAt { get; private set; }
+    public string? SyncFailure { get; private set; }
+
+    internal void MarkSyncFailed(string reason)
+    {
+        SyncFailure = reason;
+        SyncFailedAt = DateTimeOffset.UtcNow;
+        try { StatusChanged?.Invoke(); } catch { /* ignore */ }
+    }
+
+    private void ClearSyncFailure()
+    {
+        SyncFailedAt = null;
+        SyncFailure = null;
+    }
+
     private async Task RunInitialSyncAsync(MeshCoreSession session, CancellationToken ct)
     {
         _initialSyncRunning = true;
+        ClearSyncFailure();
         try
         {
             RxLog.Configure(RequireRadioId());
@@ -32,6 +56,7 @@ public sealed partial class MeshApp
             try { await Channels.SyncAsync(ct).ConfigureAwait(false); }
             catch (Exception ex) when (ex is not OperationCanceledException) { Log.Warn("Sync", "Channel sync incomplete: " + ex.Message); }
 
+            MessageSyncStartedAt = DateTimeOffset.UtcNow;
             SetSync(new SyncProgress("Messages", 0, 0));
             var count = 0;
             while (true)
@@ -51,6 +76,7 @@ public sealed partial class MeshApp
         finally
         {
             _initialSyncRunning = false;
+            MessageSyncStartedAt = null;
             // Open chats re-check their unread count now that the backlog is in (and place their "New messages" line).
             Notify(DataKind.Conversations);
         }
@@ -76,7 +102,7 @@ public sealed partial class MeshApp
                 if (wm <= DateTimeOffset.UtcNow + WatermarkSkew) since = wm.AddSeconds(-1);
             }
             var result = await session.GetContactsAsync(since, ct).ConfigureAwait(false);
-            foreach (var c in result.Contacts) Db.SaveContactFrame(radioId, c);
+            Db.SaveSyncedContacts(radioId, result.Contacts.ToList(), DateTimeOffset.UtcNow);
             if (since is null && !PendingConfig.ProtectsContacts(radioId))
             {
                 var removed = Db.PruneContacts(radioId, result.Contacts.Select(c => c.PublicKey).ToList());
@@ -89,6 +115,17 @@ public sealed partial class MeshApp
             Notify(DataKind.Contacts);
             Notify(DataKind.Conversations);
         }
+        finally { _contactSyncLock.Release(); }
+    }
+
+    /// <summary>
+    /// Runs a contact change that reads the radio and saves the result (favourite, discovered path) one at a time with
+    /// contact syncs, so an older sync snapshot can't be saved over the newer change.
+    /// </summary>
+    internal async Task<T> RunContactOperationAsync<T>(Func<Task<T>> operation, CancellationToken ct = default)
+    {
+        await _contactSyncLock.WaitAsync(ct).ConfigureAwait(false);
+        try { return await operation().ConfigureAwait(false); }
         finally { _contactSyncLock.Release(); }
     }
 
@@ -118,6 +155,7 @@ public sealed partial class MeshApp
     {
         var session = RequireSession();
         SetStatus(LinkStatus.Syncing, L.T("Resyncing…"));
+        ClearSyncFailure();
         try
         {
             SetSync(new SyncProgress("Contacts", 0, 0));
@@ -126,6 +164,11 @@ public sealed partial class MeshApp
             await Channels.SyncAsync(ct).ConfigureAwait(false);
             session.RequestMessageDrain();
             LastSyncAt = DateTimeOffset.Now;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && session.IsRunning)
+        {
+            MarkSyncFailed(ex.Message);
+            throw;
         }
         finally
         {

@@ -20,6 +20,8 @@ public sealed class MessageService
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _conversationLocks = new();
     private readonly ConcurrentDictionary<string, byte> _inFlight = new();
     private readonly List<(string Key, ParsedReaction? Channel, ParsedDmReaction? Dm, string Sender, string Raw, string RadioId, int? ChannelIndex, string? ContactId)> _pendingReactions = new();
+    /// <summary>Direct messages whose send was cut off by the connection going away: sent again when that radio is back.</summary>
+    private readonly ConcurrentDictionary<string, (string RadioId, string ContactId)> _interrupted = new();
     private Timer? _ackTimer;
 
     private sealed class PendingAck
@@ -31,6 +33,8 @@ public sealed class MessageService
         public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(10);
         public bool Delivered { get; set; }
         public bool LoopFinished { get; set; }
+        /// <summary>The session stopped while this send was still trying: it stays pending for a later replay.</summary>
+        public bool Interrupted { get; set; }
     }
 
     public MessageService(MeshApp app) => _app = app;
@@ -236,6 +240,90 @@ public sealed class MessageService
         else if (key.StartsWith("room:")) _app.Db.ClearRoomUnread(key[5..]);
         _app.Notify(DataKind.Conversations);
         UpdateBadge();
+        try { ConversationRead?.Invoke(key); } catch { /* notifications are best effort */ }
+    }
+
+    /// <summary>A chat was read (opened, or marked read): its notifications can be taken down.</summary>
+    public event Action<string>? ConversationRead;
+
+    /// <summary>True when the chat has unread messages, or unseen mentions, or was marked unread.</summary>
+    public bool IsUnread(string key)
+    {
+        var radioId = _app.RadioId;
+        if (radioId is null) return false;
+        if (key.StartsWith("dm:")) return _app.Db.GetContact(key[3..]) is { } c && (c.UnreadCount > 0 || c.UnreadMentions > 0);
+        if (key.StartsWith("ch:") && int.TryParse(key[3..], out var idx)) return _app.Db.GetChannel(radioId, idx) is { } ch && (ch.UnreadCount > 0 || ch.UnreadMentions > 0);
+        if (key.StartsWith("room:")) return (_app.Db.GetRemoteSession(key[5..])?.UnreadCount ?? 0) > 0;
+        return false;
+    }
+
+    /// <summary>
+    /// Marks a chat read, or unread: an unread chat keeps its count (or shows one) until it is opened. The unread
+    /// totals (taskbar, tray, lock screen) follow.
+    /// </summary>
+    public void SetReadState(string key, bool isRead)
+    {
+        if (isRead) { MarkRead(key); return; }
+        var radioId = _app.RequireRadioId();
+        var saved = key.StartsWith("dm:") ? _app.Db.MarkContactUnread(key[3..])
+            : key.StartsWith("ch:") && int.TryParse(key[3..], out var idx) ? _app.Db.MarkChannelUnread(radioId, idx)
+            : key.StartsWith("room:") && _app.Db.MarkRoomUnread(key[5..]);
+        if (!saved) throw new MessageServiceException(L.T("Couldn't save the read state. Try again."));
+        _app.Notify(DataKind.Conversations);
+        UpdateBadge();
+    }
+
+    // MARK: Pins (this PC only; the radio's favourite flag is separate)
+
+    public bool IsPinned(string key)
+    {
+        var radioId = _app.RadioId;
+        if (radioId is null) return false;
+        if (key.StartsWith("dm:")) return _app.Db.GetContact(key[3..])?.IsPinned ?? false;
+        if (key.StartsWith("ch:") && int.TryParse(key[3..], out var idx)) return _app.Db.GetChannel(radioId, idx)?.IsPinned ?? false;
+        if (key.StartsWith("room:")) return _app.Db.GetRemoteSession(key[5..])?.IsPinned ?? false;
+        return false;
+    }
+
+    /// <summary>Pins a chat to the top of the chat list, or unpins it. Doesn't change the contact's favourite flag on the radio.</summary>
+    public void SetPinned(string key, bool pinned)
+    {
+        var radioId = _app.RequireRadioId();
+        var (saved, kind) = key.StartsWith("dm:") ? (_app.Db.SetContactPinned(key[3..], pinned), DataKind.Contacts)
+            : key.StartsWith("ch:") && int.TryParse(key[3..], out var idx) ? (_app.Db.SetChannelPinned(radioId, idx, pinned), DataKind.Channels)
+            : key.StartsWith("room:") ? (_app.Db.SetRemoteSessionPinned(key[5..], pinned), DataKind.Sessions)
+            : (false, DataKind.Conversations);
+        if (!saved) throw new MessageServiceException(L.T("Couldn't save the pin. Try again."));
+        _app.Notify(kind, key);
+        _app.Notify(DataKind.Conversations);
+    }
+
+    // MARK: Replies from notifications
+
+    /// <summary>The radio a conversation belongs to (a channel slot: the radio shown now).</summary>
+    public string? RadioIdFor(string key)
+    {
+        if (key.StartsWith("dm:")) return _app.Db.GetContact(key[3..])?.RadioId;
+        if (key.StartsWith("room:")) return _app.Db.GetRemoteSession(key[5..])?.RadioId;
+        return _app.RadioId;
+    }
+
+    /// <summary>
+    /// Sends a reply typed into a notification. It goes out only through the radio the notification came from: a
+    /// notification can outlive its connection, and a channel slot on another radio is another channel.
+    /// </summary>
+    public void SendQuickReply(string? radioId, string key, string text)
+    {
+        text = text.Trim();
+        if (text.Length == 0) return;
+        if (!_app.IsConnected) throw new MessageServiceException(L.T("Not connected to a radio."));
+        if (radioId is null || radioId != _app.RadioId || RadioIdFor(key) != radioId)
+            throw new MessageServiceException(L.T("This notification is from another radio. Connect to that radio to reply."));
+        if (key.StartsWith("dm:") && _app.Db.GetContact(key[3..]) is { } contact) QueueDirectMessage(contact, text);
+        else if (key.StartsWith("ch:") && int.TryParse(key[3..], out var idx) && _app.Db.GetChannel(radioId, idx) is not null) QueueChannelMessage(idx, text);
+        else if (key.StartsWith("room:") && _app.Db.GetRemoteSession(key[5..]) is { } room) _app.Rooms.Post(room, text);
+        else throw new MessageServiceException(L.T("This conversation is no longer on your radio."));
+        MarkRead(key);
     }
 
     public int TotalUnread()
@@ -248,7 +336,8 @@ public sealed class MessageService
         return contacts + channels + rooms;
     }
 
-    internal void UpdateBadge()
+    /// <summary>Recounts the unread total for the badges (taskbar, tray, lock screen).</summary>
+    public void UpdateBadge()
     {
         try { _app.Notifier.UpdateBadge(TotalUnread()); } catch { /* ignore */ }
     }
@@ -325,7 +414,18 @@ public sealed class MessageService
 
             _app.Db.UpdateMessageStatus(messageId, MessageStatus.Sending);
             Updated(messageId, key);
-            await _app.Channels.ApplyFloodScopeAsync(null).ConfigureAwait(false);
+
+            // The connection went away before the radio confirmed it: keep the message (and its time stamp) pending,
+            // to be sent again when this radio is back, instead of failing it.
+            void KeepPending()
+            {
+                pending.LoopFinished = true;
+                _pendingAcks.TryRemove(messageId, out _);
+                if (pending.Delivered) return;
+                if (_app.Db.UpdateMessageStatusUnlessDelivered(messageId, MessageStatus.Pending)) Updated(messageId, key);
+                _interrupted[messageId] = (contact.RadioId, contactId);
+                _app.Log.Info("Messages", $"DM to {contact.DisplayName} interrupted by the disconnect; it stays queued");
+            }
 
             while (attempts < maxAttempts && (!isFlood || floodAttempts < 1))
             {
@@ -354,10 +454,13 @@ public sealed class MessageService
                 MessageSentInfo sent;
                 try
                 {
-                    sent = await SendWithPoolBackoffAsync(() => session.SendMessageAsync(contact.PublicKey.Prefix(6), msg.Text, wireTime, (byte)attempts)).ConfigureAwait(false);
+                    var attempt = (byte)attempts;
+                    sent = await _app.Channels.SendDirectScopedAsync(session,
+                        () => SendWithPoolBackoffAsync(() => session.SendMessageAsync(contact.PublicKey.Prefix(6), msg.Text, wireTime, attempt))).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
+                    if (!session.IsRunning || pending.Interrupted) { KeepPending(); return; }
                     _app.Log.Warn("Messages", $"DM send failed: {ex.Message}");
                     _pendingAcks.TryRemove(messageId, out _);
                     _app.Db.UpdateMessageStatus(messageId, MessageStatus.Failed);
@@ -372,14 +475,19 @@ public sealed class MessageService
                 if (attempts == 0) { _app.Db.UpdateMessageAck(messageId, sent.AckCodeUInt32, MessageStatus.Sent); Updated(messageId, key); }
                 if (isResend && attempts == 0) _app.Db.IncrementSendCount(messageId);
                 var deadline = DateTimeOffset.UtcNow + ackTimeout;
-                while (!pending.Delivered && DateTimeOffset.UtcNow < deadline && session.IsRunning)
+                while (!pending.Delivered && DateTimeOffset.UtcNow < deadline && session.IsRunning && !pending.Interrupted)
                     await Task.Delay(100).ConfigureAwait(false);
                 if (pending.Delivered) break;
                 attempts++;
                 if (isFlood) floodAttempts++;
-                if (!session.IsRunning) break;
+                if (!session.IsRunning || pending.Interrupted) break;
             }
 
+            if (!pending.Delivered && (!session.IsRunning || pending.Interrupted))
+            {
+                KeepPending();
+                return;
+            }
             pending.LoopFinished = true;
             if (pending.Delivered)
             {
@@ -468,6 +576,12 @@ public sealed class MessageService
     {
         foreach (var p in _pendingAcks.Values.ToList())
         {
+            if (!p.LoopFinished)
+            {
+                // Still being sent (waiting for its ACK or a retry): the send loop keeps it pending for a replay.
+                p.Interrupted = true;
+                continue;
+            }
             _pendingAcks.TryRemove(p.MessageId, out _);
             if (!p.Delivered && _app.Db.UpdateMessageStatusUnlessDelivered(p.MessageId, MessageStatus.Failed))
                 Updated(p.MessageId, DmKey(p.ContactId));
@@ -475,17 +589,41 @@ public sealed class MessageService
         lock (_pendingReactions) _pendingReactions.Clear();
     }
 
-    /// <summary>Messages left pending by a previous run are marked failed so the user can retry them.</summary>
+    /// <summary>Direct messages kept pending after a disconnect (sent again when their radio reconnects).</summary>
+    public int InterruptedCount => _interrupted.Count;
+
+    /// <summary>
+    /// After connecting: direct messages whose send the disconnect cut off are sent again (same time stamp, so the
+    /// recipient sees one message). Messages left pending by an earlier run are marked failed so the user can retry them.
+    /// </summary>
     internal void ResumePendingAfterConnect()
     {
         var radioId = _app.RadioId;
         if (radioId is null) return;
-        var stuck = _app.Db.GetPendingOutgoing(radioId).Where(m => !_inFlight.ContainsKey(m.Id)).ToList();
-        foreach (var m in stuck)
+        var pendingRows = _app.Db.GetPendingOutgoing(radioId);
+        foreach (var m in pendingRows)
         {
+            if (m.ContactId is { } contactId && _interrupted.TryGetValue(m.Id, out var origin) && origin.RadioId == radioId
+                && _interrupted.TryRemove(m.Id, out _))
+            {
+                _ = Task.Run(() => ReplayInterruptedAsync(m.Id, contactId));
+                continue;
+            }
+            if (_inFlight.ContainsKey(m.Id)) continue;
             _app.Db.UpdateMessageStatus(m.Id, MessageStatus.Failed);
             Updated(m.Id, m.ContactId is { } c ? DmKey(c) : ChannelKey(m.ChannelIndex ?? 0));
         }
+        // Rows deleted (or delivered) meanwhile.
+        foreach (var id in _interrupted.Where(e => e.Value.RadioId == radioId).Select(e => e.Key).ToList())
+            if (_app.Db.GetMessage(id) is not { Status: (int)MessageStatus.Pending }) _interrupted.TryRemove(id, out _);
+    }
+
+    private async Task ReplayInterruptedAsync(string messageId, string contactId)
+    {
+        // The cut-off send may still be unwinding.
+        for (var i = 0; i < 100 && _inFlight.ContainsKey(messageId); i++) await Task.Delay(50).ConfigureAwait(false);
+        _app.Log.Info("Messages", "Sending a direct message the disconnect interrupted");
+        await SendDirectLoopAsync(messageId, contactId, preserveTimestamp: true).ConfigureAwait(false);
     }
 
     // MARK: Channels
@@ -542,8 +680,9 @@ public sealed class MessageService
             Updated(messageId, key);
             try
             {
-                await _app.Channels.ApplyFloodScopeAsync(channelIndex).ConfigureAwait(false);
-                await SendWithPoolBackoffAsync(() => session.SendChannelMessageAsync((byte)channelIndex, msg.Text, DateTimeOffset.FromUnixTimeSeconds(ts))).ConfigureAwait(false);
+                // The channel's region is set right before the message (also for retries and notification replies).
+                await _app.Channels.SendChannelScopedAsync(session, channelIndex,
+                    () => SendWithPoolBackoffAsync(() => session.SendChannelMessageAsync((byte)channelIndex, msg.Text, DateTimeOffset.FromUnixTimeSeconds(ts)))).ConfigureAwait(false);
                 _app.Db.UpdateMessageStatus(messageId, MessageStatus.Sent);
                 if (isResend) _app.Db.IncrementSendCount(messageId);
             }
@@ -560,8 +699,9 @@ public sealed class MessageService
     public void DeleteMessage(MessageRecord m)
     {
         _app.Db.DeleteMessage(m.Id);
+        _interrupted.TryRemove(m.Id, out _);
         var key = m.ContactId is { } c ? DmKey(c) : ChannelKey(m.ChannelIndex ?? 0);
-        _app.Notify(DataKind.Messages, key);
+        _app.Notify(DataKind.Messages, key, m.Id);
         _app.Notify(DataKind.Conversations);
     }
 
@@ -576,30 +716,32 @@ public sealed class MessageService
         {
             var targetSender = target.IsOutgoing ? _app.SelfName : target.SenderName ?? "";
             text = ReactionParser.BuildChannelReaction(emoji, targetSender, target.Text, target.WireTimestamp);
-            await _app.Channels.ApplyFloodScopeAsync(idx).ConfigureAwait(false);
-            await SendWithPoolBackoffAsync(() => session.SendChannelMessageAsync((byte)idx, text, DateTimeOffset.UtcNow)).ConfigureAwait(false);
+            var reaction = text;
+            await _app.Channels.SendChannelScopedAsync(session, idx,
+                () => SendWithPoolBackoffAsync(() => session.SendChannelMessageAsync((byte)idx, reaction, DateTimeOffset.UtcNow))).ConfigureAwait(false);
         }
         else if (target.ContactId is { } cid)
         {
             var contact = _app.Db.GetContact(cid) ?? throw new MessageServiceException(L.T("Contact not found"));
             text = ReactionParser.BuildDmReaction(emoji, target.Text, target.WireTimestamp);
-            var sent = await session.SendMessageAsync(contact.PublicKey.Prefix(6), text, DateTimeOffset.UtcNow).ConfigureAwait(false);
-            _ = sent;
+            var reaction = text;
+            await _app.Channels.SendDirectScopedAsync(session, () => session.SendMessageAsync(contact.PublicKey.Prefix(6), reaction, DateTimeOffset.UtcNow)).ConfigureAwait(false);
         }
         else return;
-        _app.Db.SaveReactionIfNew(new ReactionRecord
-        {
-            MessageId = target.Id,
-            RadioId = radioId,
-            Emoji = emoji,
-            SenderName = _app.SelfName,
-            MessageHash = ReactionParser.GenerateMessageHash(target.Text, target.WireTimestamp),
-            RawText = text,
-            ContactId = target.ContactId,
-            ChannelIndex = target.ChannelIndex,
-            IsOutgoing = true,
-        });
-        RefreshReactionSummary(target.Id, target.ContactId is { } c2 ? DmKey(c2) : ChannelKey(target.ChannelIndex!.Value));
+        // Saved with the summary of the rows as they are now (another reaction may have arrived meanwhile).
+        if (_app.Db.AdmitReaction(new ReactionRecord
+            {
+                MessageId = target.Id,
+                RadioId = radioId,
+                Emoji = emoji,
+                SenderName = _app.SelfName,
+                MessageHash = ReactionParser.GenerateMessageHash(target.Text, target.WireTimestamp),
+                RawText = text,
+                ContactId = target.ContactId,
+                ChannelIndex = target.ChannelIndex,
+                IsOutgoing = true,
+            }) is not null)
+            Updated(target.Id, target.ContactId is { } c2 ? DmKey(c2) : ChannelKey(target.ChannelIndex!.Value));
         _app.Settings.Update(s =>
         {
             s.RecentEmoji.Remove(emoji);
@@ -608,18 +750,11 @@ public sealed class MessageService
         });
     }
 
-    private void RefreshReactionSummary(string messageId, string key)
-    {
-        var all = _app.Db.GetReactions(messageId);
-        var summary = ReactionParser.BuildSummary(all.Select(r => (r.Emoji, r.ReceivedAt)));
-        _app.Db.SetReactionSummary(messageId, summary.Length == 0 ? null : summary);
-        Updated(messageId, key);
-    }
-
+    /// <summary>Saves a received reaction and its message's summary together; false if it was a repeat or the message is gone.</summary>
     private bool PersistReaction(ReactionRecord r, string key)
     {
-        if (!_app.Db.SaveReactionIfNew(r)) return false;
-        RefreshReactionSummary(r.MessageId, key);
+        if (_app.Db.AdmitReaction(r) is not { Inserted: true }) return false;
+        Updated(r.MessageId, key);
         return true;
     }
 

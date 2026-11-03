@@ -226,10 +226,17 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     /// <summary>Backups, restores and exports need the radio disconnected.</summary>
     public bool CanTransfer => !IsRadioConnected;
+
+    /// <summary>Restoring works disconnected, or connected once the radio has synced (its part is then written right away).</summary>
+    public bool CanRestore => !IsRadioConnected || Core.Status == LinkStatus.Ready;
     public bool HasPendingRadioWrite => PendingSummary is not null;
     public bool CanAutoStart => AppHost.GetAutoStart is not null;
 
-    partial void OnIsRadioConnectedChanged(bool value) => OnPropertyChanged(nameof(CanTransfer));
+    partial void OnIsRadioConnectedChanged(bool value)
+    {
+        OnPropertyChanged(nameof(CanTransfer));
+        OnPropertyChanged(nameof(CanRestore));
+    }
     partial void OnPendingSummaryChanged(string? value) => OnPropertyChanged(nameof(HasPendingRadioWrite));
 
     private bool _startWithWindows;
@@ -324,7 +331,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         base.OnPropertyChanged(e);
         if (_loading || e.PropertyName is nameof(TileCacheSize) or nameof(Message) or nameof(DefaultAppearance) or nameof(HasDefaultAppearance)
             or nameof(ChatToCustomize) or nameof(CustomizedSummary) or nameof(SelectedCategory) or nameof(CompactSidebar) or nameof(NoCustomizedChats)
-            or nameof(StartWithWindows) or nameof(CanTransfer) or nameof(PendingSummary) or nameof(HasPendingRadioWrite) or nameof(CanApplyPending)
+            or nameof(StartWithWindows) or nameof(CanTransfer) or nameof(CanRestore) or nameof(PendingSummary) or nameof(HasPendingRadioWrite) or nameof(CanApplyPending)
             or nameof(LockScreenStatus) or nameof(HasWidget) or nameof(RadioSummary) or nameof(RadioSummaryTitle) or nameof(HasRadioSummary)
             || e.PropertyName?.StartsWith("Is") == true || e.PropertyName?.StartsWith("Widget") == true) return;
         if (e.PropertyName == nameof(ChatThemesEnabled)) { ChatThemes.Enabled = ChatThemesEnabled; return; }
@@ -370,8 +377,17 @@ public sealed partial class SettingsViewModel : ViewModelBase
         if (e.PropertyName is nameof(CompactChatList) or nameof(UseTwentyFourHourTime)) _main.Chats.Reload();
     }
 
+    /// <summary>The radio's Bluetooth/WiFi links ("Switch to WiFi" / "Switch to Bluetooth").</summary>
+    public RadioLinksViewModel Links { get; } = new();
+
+    private CoreScopeLinkViewModel? _coreScope;
+
+    /// <summary>The link to the user's state or region CoreScope (its tab appears in the sidebar once linked).</summary>
+    public CoreScopeLinkViewModel CoreScope => _coreScope ??= new CoreScopeLinkViewModel(_main);
+
     public void OnShown()
     {
+        _ = Links.LoadWifiAsync();
         _ = Task.Run(TileService.CacheSizeBytes).ContinueWith(t => Ui(() => TileCacheSize = L.F("Using {0}", Formatters.Bytes(t.Result))));
         RefreshChatThemes();
     }
@@ -488,11 +504,16 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [RelayCommand]
     private async Task RestoreAppData()
     {
-        if (!await RequireDisconnected()) return;
+        if (Core.Status is LinkStatus.Connecting or LinkStatus.Syncing or LinkStatus.Reconnecting)
+        {
+            await AppHost.Dialogs.ShowError(L.T("Restore"), L.T("Wait until the radio has finished syncing, then try again."));
+            return;
+        }
         var path = await AppHost.Dialogs.PickOpenFile(L.T("Restore a backup"), [Mc1Backup.Extension, "zip"], L.T("MeshCore backup (.mc1backup)"));
         if (path is null) return;
         if (path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
         {
+            if (!await RequireDisconnected()) return;
             // Backups from earlier versions of this app.
             if (!await AppHost.Dialogs.Confirm(L.T("Restore backup?"), L.T("This replaces all messages, contacts and settings on this PC with the backup."), L.T("Restore"), true)) return;
             await Guard(async () =>
@@ -649,9 +670,11 @@ public sealed partial class ConfigTransferViewModel : ViewModelBase
         HasName = !string.IsNullOrWhiteSpace(d.NodeName);
         NameLabel = HasName ? L.F("Name ({0})", d.NodeName) : L.T("Name");
         HasRadio = d.FrequencyKhz > 0 && d.SpreadingFactor > 0;
-        RadioLabel = HasRadio
-            ? L.F("Radio settings ({0:0.###} MHz · {1:0.#} kHz · SF{2} · CR{3} · {4} dBm)", d.FrequencyKhz / 1000.0, d.BandwidthHz / 1000.0, d.SpreadingFactor, d.CodingRate, d.TxPower)
-            : L.T("Radio settings");
+        var preset = Mc1Backup.PresetOf(d);
+        RadioLabel = !HasRadio ? L.T("Radio settings")
+            : preset is not null
+                ? L.F("Radio settings: {0} preset ({1:0.###} MHz · {2:0.#} kHz · SF{3} · CR{4} · {5} dBm)", preset.Name, d.FrequencyKhz / 1000.0, d.BandwidthHz / 1000.0, d.SpreadingFactor, d.CodingRate, d.TxPower)
+                : L.F("Radio settings ({0:0.###} MHz · {1:0.#} kHz · SF{2} · CR{3} · {4} dBm)", d.FrequencyKhz / 1000.0, d.BandwidthHz / 1000.0, d.SpreadingFactor, d.CodingRate, d.TxPower);
         HasPosition = d.Latitude != 0 || d.Longitude != 0;
         PositionLabel = HasPosition ? L.F("Position ({0:0.#####}, {1:0.#####})", d.Latitude, d.Longitude) : L.T("Position");
         HasChannels = item.ChannelCount > 0;
@@ -686,7 +709,17 @@ public sealed partial class ConfigTransferViewModel : ViewModelBase
         var same = SelectedTarget?.SameRadio ?? false;
         Name = HasName && same;
         Position = HasPosition && same;
+        RadioPartHeading = IntoConnectedRadio ? L.T("Written to the connected radio now") : L.T("Written to the radio when you connect it");
+        RadioPartHint = IntoConnectedRadio
+            ? L.T("Restored contacts and channels are added to the radio too. The radio settings switch it to the backup's preset and frequency.")
+            : L.T("Restored contacts and channels are also added to the radio then. You'll be asked before anything is written.");
     }
+
+    [ObservableProperty] private string _radioPartHeading = L.T("Written to the radio when you connect it");
+    [ObservableProperty] private string _radioPartHint = L.T("Restored contacts and channels are also added to the radio then. You'll be asked before anything is written.");
+
+    /// <summary>Restoring into the radio that's connected right now: its part is written straight away.</summary>
+    private bool IntoConnectedRadio => Core.IsConnected && SelectedTarget?.Id is { } id && id == Core.RadioId;
 
     [RelayCommand]
     private async Task Go()
@@ -694,7 +727,8 @@ public sealed partial class ConfigTransferViewModel : ViewModelBase
         Error = null;
         if (SelectedDevice is not { } item) { Error = L.T("This file has no radio in it."); return; }
         if (!(Name || Radio || Position || Other || Channels || Contacts || Messages || Paths || AppSettings)) { Error = L.T("Select at least one item."); return; }
-        if (Core.IsConnected) { Error = L.T("Disconnect the radio first."); return; }
+        if (Core.IsConnected && Core.IsInitialSyncRunning) { Error = L.T("Wait until the radio has finished syncing, then try again."); return; }
+        var now = IntoConnectedRadio;
         Busy = true;
         Progress = L.T("Restoring…");
         try
@@ -709,7 +743,13 @@ public sealed partial class ConfigTransferViewModel : ViewModelBase
             if (r.SavedPaths > 0) parts.Add(L.Plural(r.SavedPaths, "{0} saved path", "{0} saved paths"));
             if (r.SettingsRestored) parts.Add(L.T("settings"));
             var text = parts.Count == 0 ? L.T("Everything was already here.") : L.F("Restored {0}.", string.Join(", ", parts));
-            if (r.RadioWritePending) text += " " + L.F("The radio part is written to {0} when you connect it.", r.RadioName);
+            if (r.RadioWritePending && now && Core.IsConnected && Core.PendingConfig.IsFor(Core.RadioId))
+            {
+                // The connected radio: write its part (name, preset and frequency, channels, contacts) now.
+                Progress = L.T("Writing to the radio…");
+                text += " " + await Core.PendingConfig.ApplyAsync(new Progress<string>(p => Progress = L.F("Writing to the radio: {0}…", p)));
+            }
+            else if (r.RadioWritePending) text += " " + L.F("The radio part is written to {0} when you connect it.", r.RadioName);
             Close?.Invoke();
             AppHost.Main?.ShowToast(L.T("Backup restored"), text);
         }

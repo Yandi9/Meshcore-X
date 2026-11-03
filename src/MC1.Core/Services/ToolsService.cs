@@ -41,6 +41,10 @@ public sealed class ToolsService
         return hops.SelectMany(h => h).ToArray();
     }
 
+    /// <summary>
+    /// Sends one trace and waits for its reply. Cancelling <paramref name="ct"/>, or the radio disconnecting, throws
+    /// <see cref="OperationCanceledException"/> — a stopped run is never reported as a radio timeout.
+    /// </summary>
     public async Task<TraceRunResult> RunTraceAsync(byte[] path, byte hashMode, CancellationToken ct = default)
     {
         var session = _app.RequireSession();
@@ -48,15 +52,19 @@ public sealed class ToolsService
         var tag = (uint)Random.Shared.NextInt64(1, uint.MaxValue);
         var tcs = new TaskCompletionSource<TraceInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnEvent(MeshEvent e) { if (e is MeshEvent.TraceData t && t.Info.Tag == tag) tcs.TrySetResult(t.Info); }
+        void OnStatus() { if (!_app.IsConnected) tcs.TrySetCanceled(); }
         _app.RadioEvent += OnEvent;
+        _app.StatusChanged += OnStatus;
         var started = DateTime.UtcNow;
         try
         {
             MessageSentInfo sent;
             try { sent = await session.SendTraceAsync(tag, 0, hashMode, path, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex) { return new TraceRunResult(false, [], 0, L.F("Couldn't send trace: {0}", ex.Message), path, hashSize); }
             var timeout = sent.SuggestedTimeoutMs == 0 ? 30 : Math.Clamp(sent.SuggestedTimeoutMs / 1000.0 * 1.2 + 8, 5, 60);
             var done = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(timeout), ct)).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
             if (done != tcs.Task) return new TraceRunResult(false, [], 0, L.T("No response (timed out)"), path, hashSize);
             var info = await tcs.Task.ConfigureAwait(false);
             var rtt = (int)(DateTime.UtcNow - started).TotalMilliseconds;
@@ -65,7 +73,11 @@ public sealed class ToolsService
                 n.Snr)).ToList();
             return new TraceRunResult(true, hops, rtt, null, path, hashSize);
         }
-        finally { _app.RadioEvent -= OnEvent; }
+        finally
+        {
+            _app.RadioEvent -= OnEvent;
+            _app.StatusChanged -= OnStatus;
+        }
     }
 
     public IReadOnlyList<TracePathRecord> SavedPaths() => _app.RadioId is { } id ? _app.Db.GetTracePaths(id) : [];
@@ -111,14 +123,22 @@ public sealed class ToolsService
             }
             onFound?.Invoke(n);
         }
+        // Disconnecting ends the listening early (what was heard so far is kept).
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        void OnStatus() { if (!_app.IsConnected) { try { stop.Cancel(); } catch (ObjectDisposedException) { } } }
         _app.RadioEvent += OnEvent;
+        _app.StatusChanged += OnStatus;
         try
         {
-            tag = await session.SendNodeDiscoverRequestAsync(filter, prefixOnly: false, ct: ct).ConfigureAwait(false);
-            await Task.Delay(listen, ct).ConfigureAwait(false);
+            tag = await session.SendNodeDiscoverRequestAsync(filter, prefixOnly: false, ct: stop.Token).ConfigureAwait(false);
+            await Task.Delay(listen, stop.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { }
-        finally { _app.RadioEvent -= OnEvent; }
+        finally
+        {
+            _app.RadioEvent -= OnEvent;
+            _app.StatusChanged -= OnStatus;
+        }
         lock (results) return results.ToList();
     }
 
@@ -179,14 +199,18 @@ public sealed class ToolsService
 
     // MARK: Elevation (line of sight)
 
-    /// <summary>Terrain elevations from Open-Meteo (max 100 points per request).</summary>
-    public async Task<IReadOnlyList<ElevationSample>> FetchElevationProfileAsync(double lat1, double lon1, double lat2, double lon2, IReadOnlyList<(double Lat, double Lon)>? via = null, CancellationToken ct = default)
+    /// <summary>
+    /// The points to fetch terrain for, along the great-circle route A → (via…) → B, with their distance from A
+    /// (at most 100, endpoints kept). Empty when there is no route (invalid coordinates, antipodal points).
+    /// </summary>
+    public static IReadOnlyList<(double Lat, double Lon, double Dist)> ElevationSamplePoints(double lat1, double lon1, double lat2, double lon2, IReadOnlyList<(double Lat, double Lon)>? via = null)
     {
         var waypoints = new List<(double Lat, double Lon)> { (lat1, lon1) };
         if (via is not null) waypoints.AddRange(via);
         waypoints.Add((lat2, lon2));
         var total = 0.0;
         for (var i = 1; i < waypoints.Count; i++) total += RfCalculator.Distance(waypoints[i - 1].Lat, waypoints[i - 1].Lon, waypoints[i].Lat, waypoints[i].Lon);
+        if (!double.IsFinite(total)) return [];
         var count = RfCalculator.SampleCountForDistance(total);
         var points = new List<(double Lat, double Lon, double Dist)>();
         var acc = 0.0;
@@ -195,6 +219,7 @@ public sealed class ToolsService
             var seg = RfCalculator.Distance(waypoints[i - 1].Lat, waypoints[i - 1].Lon, waypoints[i].Lat, waypoints[i].Lon);
             var n = Math.Max(2, (int)Math.Round(count * (total <= 0 ? 1 : seg / total)));
             var samples = RfCalculator.SamplePath(waypoints[i - 1].Lat, waypoints[i - 1].Lon, waypoints[i].Lat, waypoints[i].Lon, n);
+            if (samples.Count == 0) return [];
             for (var j = i == 1 ? 0 : 1; j < samples.Count; j++)
                 points.Add((samples[j].Lat, samples[j].Lon, acc + seg * j / (samples.Count - 1)));
             acc += seg;
@@ -204,9 +229,31 @@ public sealed class ToolsService
             var step = (points.Count - 1) / 99.0;
             points = Enumerable.Range(0, 100).Select(i => points[(int)Math.Round(i * step)]).ToList();
         }
+        return points;
+    }
+
+    /// <summary>A longitude for the elevation service: six decimals, and a value that rounds to +180 sent as −180.</summary>
+    public static string FormatElevationLongitude(double lon)
+    {
+        var text = lon.ToString("0.000000", CultureInfo.InvariantCulture);
+        return text == "180.000000" ? "-180.000000" : text;
+    }
+
+    /// <summary>The Open-Meteo elevation request for these points.</summary>
+    public static string ElevationRequestUrl(IEnumerable<(double Lat, double Lon)> points)
+    {
+        var list = points.ToList();
         var inv = CultureInfo.InvariantCulture;
-        var url = "https://api.open-meteo.com/v1/elevation?latitude=" + string.Join(",", points.Select(p => p.Lat.ToString("0.000000", inv))) +
-                  "&longitude=" + string.Join(",", points.Select(p => p.Lon.ToString("0.000000", inv)));
+        return "https://api.open-meteo.com/v1/elevation?latitude=" + string.Join(",", list.Select(p => p.Lat.ToString("0.000000", inv))) +
+               "&longitude=" + string.Join(",", list.Select(p => FormatElevationLongitude(p.Lon)));
+    }
+
+    /// <summary>Terrain elevations from Open-Meteo (max 100 points per request) along the great-circle route.</summary>
+    public async Task<IReadOnlyList<ElevationSample>> FetchElevationProfileAsync(double lat1, double lon1, double lat2, double lon2, IReadOnlyList<(double Lat, double Lon)>? via = null, CancellationToken ct = default)
+    {
+        var points = ElevationSamplePoints(lat1, lon1, lat2, lon2, via);
+        if (points.Count == 0) throw new InvalidDataException(L.T("No elevation data returned"));
+        var url = ElevationRequestUrl(points.Select(p => (p.Lat, p.Lon)));
         Exception? last = null;
         for (var attempt = 0; attempt < 3; attempt++)
         {
@@ -214,7 +261,9 @@ public sealed class ToolsService
             {
                 var resp = await _http.GetFromJsonAsync<ElevationResponse>(url, ct).ConfigureAwait(false);
                 if (resp?.Elevation is not { } elev || elev.Count != points.Count) throw new InvalidDataException(L.T("Unexpected elevation response"));
-                return points.Select((p, i) => new ElevationSample(p.Lat, p.Lon, elev[i], p.Dist)).ToList();
+                // Missing terrain must not pass for flat ground at sea level.
+                if (elev.Any(e => e is not { } v || !double.IsFinite(v))) throw new InvalidDataException(L.T("No elevation data returned"));
+                return points.Select((p, i) => new ElevationSample(p.Lat, p.Lon, elev[i]!.Value, p.Dist)).ToList();
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -225,5 +274,5 @@ public sealed class ToolsService
         throw new InvalidOperationException(L.F("Couldn't fetch terrain data: {0}", last?.Message), last);
     }
 
-    private sealed record ElevationResponse(List<double>? Elevation);
+    private sealed record ElevationResponse(List<double?>? Elevation);
 }

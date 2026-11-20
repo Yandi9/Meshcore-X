@@ -284,6 +284,34 @@
         </ScrollViewer>
       </TabItem>
 
+      <!-- Sensor management (sensors only) -->
+      <TabItem Header="{l:T 'Sensor'}" IsVisible="{Binding IsSensor}">
+        <ScrollViewer>
+          <StackPanel Margin="6,10" Spacing="8" MaxWidth="760" HorizontalAlignment="Left">
+            <TextBlock Classes="hint" TextWrapping="Wrap" Text="{l:T 'Changes affect the running sensor. Persistence across reboot depends on its firmware. Requires admin sign-in.'}" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button Classes="accent" Content="{l:T 'Load settings'}" Command="{Binding LoadSensorSettingsCommand}" IsEnabled="{Binding !Busy}" />
+              <Button Content="{l:T 'Reboot sensor'}" Command="{Binding RebootSensorCommand}" IsEnabled="{Binding !Busy}" />
+            </StackPanel>
+            <TextBlock Classes="hint" Text="{Binding SensorNote}" IsVisible="{Binding SensorNote, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            <Border Classes="group" IsVisible="{Binding SensorSettingsLoaded}">
+              <ItemsControl ItemsSource="{Binding SensorSettings}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:SensorSettingRow">
+                    <Grid ColumnDefinitions="200,*,Auto" Classes="setting">
+                      <TextBlock Classes="label mono" Text="{Binding Key}" VerticalAlignment="Center" />
+                      <TextBox Grid.Column="1" Classes="mono" Text="{Binding Value}" VerticalAlignment="Center" />
+                      <Button Grid.Column="2" Content="{l:T 'Save'}" Margin="8,0,0,0" VerticalAlignment="Center" IsEnabled="{Binding IsChanged}"
+                              Command="{Binding $parent[ItemsControl].((vm:RemoteAdminWorkspace)DataContext).SaveSensorSettingCommand}" CommandParameter="{Binding}" />
+                    </Grid>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
       <!-- Console -->
       <TabItem Header="{l:T 'Console'}">
         <Grid RowDefinitions="*,Auto" Margin="6,10">

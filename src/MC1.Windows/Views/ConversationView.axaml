@@ -328,6 +328,8 @@
                           </Border>
                           <ctl:MessageText Tokens="{Binding Tokens}" LinkCommand="{Binding Conversation.OpenLinkCommand}" FontSize="14"
                                            Classes.out="{Binding IsOutgoing}" />
+                          <!-- MECP emergency message: the wire text under its reading -->
+                          <TextBlock IsVisible="{Binding IsMecp}" Text="{Binding MecpDetail}" FontSize="11" Opacity="0.7" TextWrapping="Wrap" />
                           <!-- Inline image -->
                           <Image Source="{Binding InlineImage}" MaxWidth="360" MaxHeight="320" Stretch="Uniform" HorizontalAlignment="Left"
                                  IsVisible="{Binding InlineImage, Converter={x:Static ObjectConverters.IsNotNull}}" />

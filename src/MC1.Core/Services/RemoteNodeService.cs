@@ -51,6 +51,34 @@ public sealed partial class RemoteNodeService(MeshApp app)
     /// <summary>Logs into a repeater or room server. An empty password logs in as guest.</summary>
     public async Task<LoginResult> LoginAsync(ContactRecord contact, string? password, bool remember, IProgress<int>? timeoutSeconds = null, CancellationToken ct = default)
     {
+        try { return await LoginOnceAsync(contact, password, remember, timeoutSeconds, ct).ConfigureAwait(false); }
+        catch (LoginTimedOut) when (!contact.IsFloodRouted && app.Settings.Current.RemoteFloodFallback)
+        {
+            // Path fallback: the stored route may be stale. Clear it and try once by flood.
+            app.Log.Info("Remote", $"No login reply over the direct path to {contact.DisplayName}; retrying via flood");
+            ContactRecord flood;
+            try
+            {
+                await app.RequireSession().ResetPathAsync(contact.PublicKey, ct).ConfigureAwait(false);
+                flood = await app.Contacts.RefreshFromRadioAsync(contact).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A failed reset reports the original timeout; the path stays as it was.
+                app.Log.Warn("Remote", "Path reset failed: " + ex.Message);
+                throw new RemoteNodeException(L.T("No response from the node (timed out)."));
+            }
+            try { return await LoginOnceAsync(flood, password, remember, timeoutSeconds, ct).ConfigureAwait(false); }
+            catch (LoginTimedOut) { throw new RemoteNodeException(L.T("No response from the node (timed out).")); }
+        }
+        catch (LoginTimedOut) { throw new RemoteNodeException(L.T("No response from the node (timed out).")); }
+    }
+
+    /// <summary>No login reply arrived in time (internal; surfaced as a <see cref="RemoteNodeException"/>).</summary>
+    private sealed class LoginTimedOut : Exception;
+
+    private async Task<LoginResult> LoginOnceAsync(ContactRecord contact, string? password, bool remember, IProgress<int>? timeoutSeconds, CancellationToken ct)
+    {
         var session = app.RequireSession();
         var remote = GetOrCreateSession(contact);
         var pwd = password ?? app.Secrets.GetPassword(contact.PublicKey) ?? "";
@@ -82,7 +110,7 @@ public sealed partial class RemoteNodeService(MeshApp app)
                 if (DateTime.UtcNow >= deadline) break;
                 try { await session.SendLoginAsync(contact.PublicKey, pwd, ct).ConfigureAwait(false); } catch (Exception ex) { app.Log.Debug("Remote", "Login retransmit failed: " + ex.Message); }
             }
-            if (!tcs.Task.IsCompleted) throw new RemoteNodeException(L.T("No response from the node (timed out)."));
+            if (!tcs.Task.IsCompleted) throw new LoginTimedOut();
             var result = await tcs.Task.ConfigureAwait(false);
             if (!result.Success) throw new RemoteNodeException(L.T("Login failed — wrong password?"));
             app.Db.SetRemoteSessionConnected(remote.Id, true, result.Permission);
@@ -267,11 +295,12 @@ public sealed partial class RemoteNodeService(MeshApp app)
     public Task<IReadOnlyList<string>> RequestRegionsAsync(ContactRecord contact, CancellationToken ct = default) =>
         app.RequireSession().RequestRegionsAsync(contact.ToMeshContact(), ct);
 
-    /// <summary>On timeout over a stored direct path, resets to flood once and retries (path may be stale).</summary>
+    /// <summary>On timeout over a stored direct path, resets to flood once and retries (path may be stale) — unless "Path
+    /// fallback" is off, which leaves the path in place.</summary>
     private async Task<T> WithFloodRecovery<T>(ContactRecord contact, Func<Task<T>> op)
     {
         try { return await op().ConfigureAwait(false); }
-        catch (MeshCoreException ex) when (ex.Kind == MeshCoreErrorKind.Timeout && !contact.IsFloodRouted)
+        catch (MeshCoreException ex) when (ex.Kind == MeshCoreErrorKind.Timeout && !contact.IsFloodRouted && app.Settings.Current.RemoteFloodFallback)
         {
             app.Log.Info("Remote", $"Timeout over direct path to {contact.DisplayName}; retrying via flood");
             await app.RequireSession().ResetPathAsync(contact.PublicKey).ConfigureAwait(false);

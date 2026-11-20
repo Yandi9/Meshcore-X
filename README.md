@@ -14,14 +14,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Yandi9/Meshcore-X/releases/download/v1.1.0/MeshCore-1.1.0-win-x64.zip"><img src="https://img.shields.io/badge/Download-Windows%20x64-2563eb?style=for-the-badge" alt="Download for Windows x64"></a>
+  <a href="https://github.com/Yandi9/Meshcore-X/releases/download/v1.2.0/MeshCore-1.2.0-win-x64.zip"><img src="https://img.shields.io/badge/Download-Windows%20x64-2563eb?style=for-the-badge" alt="Download for Windows x64"></a>
   &nbsp;
-  <a href="https://github.com/Yandi9/Meshcore-X/releases/download/v1.1.0/MeshCore-1.1.0-win-arm64.zip"><img src="https://img.shields.io/badge/Download-Windows%20on%20ARM-2563eb?style=for-the-badge" alt="Download for Windows on ARM"></a>
+  <a href="https://github.com/Yandi9/Meshcore-X/releases/download/v1.2.0/MeshCore-1.2.0-win-arm64.zip"><img src="https://img.shields.io/badge/Download-Windows%20on%20ARM-2563eb?style=for-the-badge" alt="Download for Windows on ARM"></a>
 </p>
 
 **MeshCore-X** is a Windows desktop app for [MeshCore](https://meshcore.io) LoRa mesh radios. Connect your companion radio over Bluetooth LE, USB or WiFi, then chat with the mesh, see it on a map and use full radio tools on a big screen with a keyboard and mouse.
 
-It's the Windows adaptation of [MeshCore One](https://github.com/Avi0n/MeshCoreOne) by Avi0n and contributors, maintained by **YndreW**. Version 1.1.0 matches MeshCore One 1.6.2.
+It's the Windows adaptation of [MeshCore One](https://github.com/Avi0n/MeshCoreOne) by Avi0n and contributors, maintained by **YndreW**. Version 1.2.0 matches MeshCore One 1.7.1.
 
 <p align="center">
   <picture>
@@ -33,11 +33,13 @@ It's the Windows adaptation of [MeshCore One](https://github.com/Avi0n/MeshCoreO
 ## Features
 
 - **Chats**: direct messages, channels and room servers. Pin chats, mark them read or unread, reply, react, and share pictures and links. Every message shows its signal (SNR), hops and how many repeaters passed it on.
+- **Blocks & filters**: hide messages that match a word or phrase in the message or the sender's name, choose which chats the rules apply to, and see what was hidden under *Recently blocked*.
+- **Emergency messages**: MECP (Mesh Emergency Communication Protocol) messages read as plain phrases in your language.
 - **Contacts**: companions, repeaters, rooms and sensors. Sort them by last advert, name, distance or hops, share them by QR code, and choose who sees your telemetry.
 - **Map**: every node with a position, on standard, dark, satellite or topographic maps. Filter by when nodes were last heard and how many hops away they are, draw paths, and save maps for offline use.
 - **Radio tools**: trace path, line of sight with a terrain profile and Fresnel zone, RX log, noise floor, node discovery and a command-line terminal.
-- **Repeater and room admin**: sign in to remote nodes for their status, history charts, neighbours, settings and console.
-- **Radio settings**: presets for your country and state, frequency, power, position and adverts. On firmware 1.18 you also get radio WiFi settings, power off, and switching between Bluetooth and WiFi.
+- **Repeater, room and sensor admin**: sign in to remote nodes for their status, history charts, neighbours, settings and console, and change a sensor's settings.
+- **Radio settings**: presets for your country and state, frequency, power, position, adverts and your radio's own telemetry. On firmware 1.18 you also get radio WiFi settings, power off, and switching between Bluetooth and WiFi.
 - **CoreScope tab**: link your state's or region's [CoreScope](https://github.com/Kpa-clawbot/CoreScope) network analyzer and browse it inside the app.
 - **Backups**: MeshCore One `.mc1backup` files. Restoring a backup from the iPhone app brings back your contacts, channels, messages and the radio's preset and frequency.
 - **Made for Windows**: notifications, a tray icon, start with Windows, an optional lock screen widget, light and dark themes, and 8 languages.
@@ -104,8 +106,8 @@ It's the Windows adaptation of [MeshCore One](https://github.com/Avi0n/MeshCoreO
 
 | Your PC | Download |
 |---|---|
-| Intel or AMD (most Windows PCs) | [MeshCore-1.1.0-win-x64.zip](https://github.com/Yandi9/Meshcore-X/releases/download/v1.1.0/MeshCore-1.1.0-win-x64.zip) |
-| Windows on ARM (Surface Pro with Snapdragon, Copilot+ PCs) | [MeshCore-1.1.0-win-arm64.zip](https://github.com/Yandi9/Meshcore-X/releases/download/v1.1.0/MeshCore-1.1.0-win-arm64.zip) |
+| Intel or AMD (most Windows PCs) | [MeshCore-1.2.0-win-x64.zip](https://github.com/Yandi9/Meshcore-X/releases/download/v1.2.0/MeshCore-1.2.0-win-x64.zip) |
+| Windows on ARM (Surface Pro with Snapdragon, Copilot+ PCs) | [MeshCore-1.2.0-win-arm64.zip](https://github.com/Yandi9/Meshcore-X/releases/download/v1.2.0/MeshCore-1.2.0-win-arm64.zip) |
 
 1. Download the ZIP for your PC from the [releases page](https://github.com/Yandi9/Meshcore-X/releases).
 2. Extract the whole ZIP to a folder.

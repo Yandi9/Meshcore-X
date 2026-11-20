@@ -823,6 +823,73 @@ if (only is null || only.Any(o => o.StartsWith("32")))
     Pump(500);
     Console.WriteLine($"nav removed: {string.Join(",", vm.NavItems.Select(n => n.Label))} page={vm.CurrentPage?.GetType().Name} kept={vm.CoreScopePage is not null}");
 }
+// MeshCore One 1.7 (MeshCore-X 1.2.0): blocks & filters, DM retry settings, MECP readings, node telemetry, sensor settings.
+if (only is null || only.Any(o => o.StartsWith("33") || o.StartsWith("34") || o.StartsWith("35") || o.StartsWith("21b")))
+{
+    win.Width = 1280;
+    vm.NavCollapsed = false;
+    core.TextRules.AddRule("spam", TextRuleLookIn.Message, TextRuleMatch.Contains);
+    core.TextRules.AddRule("Robot", TextRuleLookIn.Sender, TextRuleMatch.WholeField);
+    core.TextRules.SetSelection(TextRuleKind.DirectMessage, TextRuleSelectionMode.Fixed, [TextRules.ConversationKey(core.RadioId!, core.Contacts.GetAll().First(c => c.ContactType == MeshCore.ContactType.Chat))]);
+    core.Db.AddRecentlyBlocked(new RecentlyBlockedRecord { RadioId = core.RadioId!, ConversationKey = "x", ConversationName = "Public", Sender = "Robot", Body = "Buy cheap antennas now!!!", RulePhrase = "Robot", DedupKey = "a" }, 100);
+    core.Db.AddRecentlyBlocked(new RecentlyBlockedRecord { RadioId = core.RadioId!, ConversationKey = "y", ConversationName = "#test", Sender = "Dave", Body = "more spam here", RulePhrase = "spam", DedupKey = "b" }, 100);
+    vm.Navigate(Page.Settings);
+    vm.Settings.ShowCategory("filters");
+    Pump(600);
+    Shot("33-settings-filters");
+    vm.Settings.ShowCategory("chats");
+    Pump(300);
+    foreach (var ex in win.GetVisualDescendants().OfType<Expander>()) ex.IsExpanded = true;
+    Shot("33b-settings-delivery");
+    vm.Settings.DmFallbackToFlood = false;
+    Shot("33c-settings-delivery-no-flood");
+    Console.WriteLine($"dm budget: direct={core.Settings.Current.DmDirectAttempts} flood={core.Settings.Current.DmFloodAttempts}");
+    vm.Settings.DmFallbackToFlood = true;
+    Console.WriteLine($"dm budget after on: direct={core.Settings.Current.DmDirectAttempts} flood={core.Settings.Current.DmFloodAttempts}");
+
+    vm.Navigate(Page.Chats);
+    vm.Chats.Reload();
+    Pump(400);
+    if (vm.Chats.Conversations.FirstOrDefault(c => c.Title == "#emergency") is { } emergency)
+    {
+        vm.Chats.Selected = emergency;
+        Pump(900);
+        Shot("34-chat-emergency");
+        Console.WriteLine("emergency preview: " + emergency.Preview);
+    }
+    else Console.WriteLine("no #emergency chat");
+
+    vm.Navigate(Page.Radio);
+    Await(vm.Radio.RefreshTelemetryCommand.ExecuteAsync(null));
+    Console.WriteLine($"node telemetry: {string.Join(" | ", vm.Radio.NodeTelemetry.Select(r => r.Label + "=" + r.Value))} ({vm.Radio.NodeTelemetryTime})");
+    if (win.GetVisualDescendants().OfType<RadioView>().FirstOrDefault()?.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault() is { } radioScroll)
+    {
+        foreach (var ex in win.GetVisualDescendants().OfType<Expander>()) ex.IsExpanded = true;
+        Pump(300);
+        radioScroll.ScrollToEnd();
+        Pump(300);
+        radioScroll.Offset = radioScroll.Offset.WithY(Math.Max(0, radioScroll.Extent.Height - radioScroll.Viewport.Height - 260));
+    }
+    Shot("35-radio-telemetry");
+
+    var sensor = core.Contacts.GetAll().First(c => c.ContactType == MeshCore.ContactType.Sensor);
+    Await(core.Remote.LoginAsync(sensor, "password", remember: false));
+    var nm = new NodeManagementViewModel(sensor);
+    Await(nm.Admin.LoadSensorSettingsCommand.ExecuteAsync(null));
+    Console.WriteLine($"sensor settings: {string.Join(", ", nm.Admin.SensorSettings.Select(s => s.Key + "=" + s.Value))} msg={nm.Admin.Message}");
+    if (only is null || only.Contains("21b-node-management-sensor"))
+    {
+        var dw = new Window { Width = 920, Height = 640, Content = new ContentControl { Content = nm } };
+        dw.Show();
+        Pump(600);
+        if (dw.GetVisualDescendants().OfType<TabControl>().FirstOrDefault() is { } tabs)
+            tabs.SelectedItem = tabs.Items.OfType<TabItem>().First(t => t.IsVisible && t.Header?.ToString() == L.T("Sensor"));
+        Pump(900);
+        dw.CaptureRenderedFrame()?.Save(Path.Combine(outDir, $"21b-node-management-sensor-{theme.ToLowerInvariant()}.png"));
+        Console.WriteLine("saved 21b-node-management-sensor");
+        dw.Close();
+    }
+}
 vm.Settings.OnShown();
 
 foreach (var (text, a, b, ins) in new[] { ("Hello world", 5, 5, "https://meshpic.org/Ab3x"), ("Look:", 5, 5, "https://meshpic.org/Ab3x"), ("", 0, 0, "😀"), ("ab", 1, 1, "😀"), ("replace ME please", 8, 10, "https://meshpic.org/q1w2") })

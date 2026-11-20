@@ -81,8 +81,11 @@ window open) — this is the same switch as MeshCore under *Windows Settings →
 ## Features
 
 **Chats**
-* Direct messages with delivery status (sent / delivered with round-trip time / failed), automatic retries, and a
-  switch to flood routing when the stored path stops working
+* Direct messages with delivery status (sent / delivered with round-trip time / failed) and automatic retries: by
+  default 4 attempts on the known path, then the path is cleared and 4 attempts go by flood. *Settings ▸ Chats ▸
+  Delivery (advanced)* sets *Attempts on Path*, *Flood Attempts* and *Fall Back to Flood* (room posts use the same
+  settings). *Path Fallback* there decides whether sign-in, remote commands and telemetry clear a path that gets no
+  reply and try once by flood
 * Channels: Public, hashtag (`#name`) and private channels; join from `meshcore://` links or QR codes; per-channel
   region flood scope
 * Room servers: sign in as guest or with a password, post, read history
@@ -93,6 +96,15 @@ window open) — this is the same switch as MeshCore under *Windows Settings →
 * Link previews, inline images and map previews for shared coordinates
 * Message details: route, hop list with repeater names, SNR, every heard repeat, reactions; show the path on the map
 * Per-conversation notification level (all / mentions only / muted), blocking contacts and channel senders
+* **Blocks & filters** (*Settings ▸ Blocks & filters*) — hide incoming messages that match a word or phrase. A rule
+  looks at the message, the sender's name or both, and matches anywhere (*Contains*) or only the whole text. Choose
+  which kinds of chat use the rules (public and hashtag channels are on by default; private channels, direct messages
+  and rooms can be switched on) and, for each kind, all chats or just some. Hidden messages aren't saved, notified or
+  counted as unread; the latest 100 are listed under *Recently blocked* on this PC (not in backups). Reactions from a
+  hidden sender are hidden too
+* **MECP emergency messages** — messages in the Mesh Emergency Communication Protocol (`MECP/0/M01 3pax …`) read as
+  plain phrases in the app's language (severity, each code, number of people, UTC time), with the original text under
+  them; also in the chat list and notifications. The demo radio has an `#emergency` channel with examples
 * Windows notifications with **quick reply** from the notification
 * Unread counts on every chat, contact and room, a total on the Chats button, and a red badge on the taskbar and
   tray icons (plus the window title)
@@ -148,9 +160,11 @@ open in your web browser. Remove the link and the tab goes away.
 * **CLI Terminal** — your radio's own command line (firmware 1.18 and later; older firmware gets the app's emulation),
   the firmware CLI of repeaters / rooms, and other companion radios that allow it (history, completion, sessions)
 
-**Remote node management** — sign in to repeaters and room servers; status, battery / noise / SNR history charts,
-telemetry, neighbours, access list, owner info, read and change settings (name, radio, TX power, repeat, advert
-intervals, flood hops, position, guest password…), clock sync, reboot, and an inline console. Requests keep running
+**Remote node management** — sign in to repeaters, room servers and sensors; status, battery / noise / SNR history
+charts, telemetry (°C/°F, hPa/inHg and m/ft follow *Metric units*), neighbours, access list, owner info, read and
+change settings (name, radio, TX power, repeat, advert intervals, flood hops, position, guest password…), clock sync,
+reboot, and an inline console. For a **sensor**, the *Sensor* tab lists its settings; change a value and *Save* — the
+app reads it back to verify it — or send a reboot request (admin sign-in needed). Requests keep running
 when you close the window and their results are there when you open it again.
 
 **Radio** — everything is read from the connected radio (again each time you open the page), and the preset shows
@@ -160,14 +174,16 @@ away (after one confirmation), like the iPhone app, and the app reads the settin
 them. *Settings → General* shows the current preset too.
 Name, position (or this PC's location), adverts, radio presets and manual tuning, TX power, off-grid
 repeat mode, contact auto-add filters, telemetry sharing, battery chemistry (OCV curves), path hash size, tuning,
-Bluetooth PIN, default flood region, custom variables, private key export/import, statistics, reboot, factory reset.
+Bluetooth PIN, default flood region, custom variables, private key export/import, statistics, **node telemetry**
+(the radio's own battery, temperature, GPS… with the time of the last successful reading), reboot, factory reset.
 *Your area* (country and state/province) picks the recommended preset, like the iPhone app — e.g. *Canada: BC* in
 British Columbia. With firmware 1.18 and later: the radio's **WiFi** (network, password, on/off — applied after a
 reboot), **Power off**, **Remote CLI** (which contacts may run commands on your radio), and the radio's clock follows
 this PC's time zone. A radio you've used over both Bluetooth and WiFi can be **switched** between the two from the
 Radio page, *Settings → Connection* or the Connect window.
 
-**Settings** — one page per topic (General, Chats, Chat looks, Notifications, Backup & storage, Diagnostics, About)
+**Settings** — one page per topic (General, Chats, Blocks & filters, Chat looks, Notifications, Backup & storage,
+Diagnostics, About)
 that rearranges itself for small windows: the radio's current preset, theme, a slim sidebar (Ctrl+B), start with Windows, chat and notification
 preferences, the lock screen status card and widget, backups, map cache, diagnostic log.
 

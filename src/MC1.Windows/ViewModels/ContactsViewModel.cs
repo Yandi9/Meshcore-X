@@ -443,7 +443,7 @@ public sealed partial class ContactDetailViewModel : ViewModelBase
         ActionResult = L.T("Requesting telemetry…");
         var t = await Core.Remote.RequestTelemetryAsync(Contact);
         Telemetry.Clear();
-        foreach (var p in t.DataPoints) Telemetry.Add(new DetailRow(L.F("{0} (ch {1})", p.Type.DisplayName(), p.Channel), p.FormattedValue));
+        foreach (var p in t.DataPoints) Telemetry.Add(new DetailRow(L.F("{0} (ch {1})", TelemetryFormat.Label(p), p.Channel), TelemetryFormat.Value(p, Core.Settings.Current.UseMetricUnits)));
         HasTelemetry = Telemetry.Count > 0;
         ActionResult = Telemetry.Count == 0 ? L.T("The node sent no telemetry (it may not share it with you).") : L.Plural(Telemetry.Count, "Telemetry received ({0} value).", "Telemetry received ({0} values).");
     }, e => L.F("Telemetry failed: {0}", e));

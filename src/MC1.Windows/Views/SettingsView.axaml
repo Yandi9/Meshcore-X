@@ -126,7 +126,7 @@
                 <ComboBox ItemsSource="{Binding Themes}" SelectedItem="{Binding Theme}" MinWidth="140" />
               </ctl:SettingRow>
               <ctl:SettingRow Title="{l:T '24-hour clock'}"><ToggleSwitch IsChecked="{Binding UseTwentyFourHourTime}" /></ctl:SettingRow>
-              <ctl:SettingRow Title="{l:T 'Metric units'}" Hint="{l:T 'Kilometres and metres'}"><ToggleSwitch IsChecked="{Binding UseMetricUnits}" /></ctl:SettingRow>
+              <ctl:SettingRow Title="{l:T 'Metric units'}" Hint="{l:T 'Kilometres and metres; °C and hPa in telemetry'}"><ToggleSwitch IsChecked="{Binding UseMetricUnits}" /></ctl:SettingRow>
               <ctl:SettingRow Title="{l:T 'Slim sidebar'}" Hint="{l:T 'Icons only (Ctrl+B)'}"><ToggleSwitch IsChecked="{Binding CompactSidebar}" /></ctl:SettingRow>
             </StackPanel>
           </Border>
@@ -182,14 +182,26 @@
           </Border>
           <Expander Header="{l:T 'Delivery (advanced)'}" Margin="0,10,0,0" HorizontalAlignment="Stretch">
             <StackPanel>
-              <ctl:SettingRow Title="{l:T 'Direct message attempts'}">
-                <ComboBox ItemsSource="{Binding AttemptOptions}" SelectedItem="{Binding DmMaxAttempts}" MinWidth="90" />
+              <TextBlock Classes="groupname" Text="{l:T 'Direct messages'}" Margin="0,0,0,4" />
+              <ctl:SettingRow Title="{l:T 'Fall Back to Flood'}"><ToggleSwitch IsChecked="{Binding DmFallbackToFlood}" /></ctl:SettingRow>
+              <ctl:SettingRow Title="{l:T 'Attempts on Path'}">
+                <ComboBox ItemsSource="{Binding DirectAttemptOptions}" SelectedItem="{Binding DmDirectAttempts}" MinWidth="90" />
               </ctl:SettingRow>
-              <ctl:SettingRow Title="{l:T 'Flood from attempt'}" Hint="{l:T 'When the stored path fails'}">
-                <ComboBox ItemsSource="{Binding AttemptOptions}" SelectedItem="{Binding DmFloodAfter}" MinWidth="90" />
+              <ctl:SettingRow Title="{l:T 'Flood Attempts'}" IsVisible="{Binding DmFallbackToFlood}">
+                <ComboBox ItemsSource="{Binding FloodAttemptOptions}" SelectedItem="{Binding DmFloodAttempts}" MinWidth="90" />
               </ctl:SettingRow>
+              <TextBlock Classes="hint" TextWrapping="Wrap" Margin="0,2,0,8" Text="{Binding DmAttemptsHint}" />
+              <TextBlock Classes="groupname" Text="{l:T 'Path Fallback'}" Margin="0,8,0,4" />
+              <ctl:SettingRow Title="{l:T 'Fall Back to Flood'}" Hint="{l:T 'Sign-in, remote commands and telemetry'}"><ToggleSwitch IsChecked="{Binding RemoteFloodFallback}" /></ctl:SettingRow>
+              <TextBlock Classes="hint" TextWrapping="Wrap" Margin="0,2,0,8" Text="{Binding PathFallbackHint}" />
             </StackPanel>
           </Expander>
+        </StackPanel>
+
+        <!-- Blocks & filters -->
+        <StackPanel Classes="page" IsVisible="{Binding IsFilters}">
+          <TextBlock Classes="h2" Text="{l:T 'Blocks &amp; filters'}" />
+          <ContentControl Content="{Binding Filters}" />
         </StackPanel>
 
         <!-- Chat looks -->

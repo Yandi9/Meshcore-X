@@ -1,3 +1,4 @@
+using MC1.Core.Utilities;
 using System.Globalization;
 using System.IO.Compression;
 using System.Text.Json;
@@ -102,7 +103,8 @@ public sealed class NodeConfigService(MeshApp app)
         if (sections.HasFlag(ConfigSections.Contacts))
         {
             var contacts = await s.GetContactsAsync().ConfigureAwait(false);
-            cfg.Contacts = contacts.Contacts.Select(c => new NodeConfigFile.ContactConfig
+            // ZephCore's virtual V-contact isn't a real contact: leave it out of the file.
+            cfg.Contacts = contacts.Contacts.Where(c => !VContactIdentity.IsVContact(c.PublicKey, self.PublicKey)).Select(c => new NodeConfigFile.ContactConfig
             {
                 Type = c.TypeRawValue, Name = c.AdvertisedName, PublicKey = c.PublicKey.ToHex(), Flags = (byte)c.Flags,
                 Latitude = c.Latitude.ToString(Inv), Longitude = c.Longitude.ToString(Inv),
@@ -145,10 +147,17 @@ public sealed class NodeConfigService(MeshApp app)
                 channels.Add((c.Name, Bytes.FromHex(c.Secret) is { Length: 16 } sec ? sec : throw new InvalidDataException(L.F("Channel {0} has an invalid secret", i))));
         var contacts = new List<MeshContact>();
         if (sections.HasFlag(ConfigSections.Contacts) && cfg.Contacts is not null)
+        {
+            // Never write a ZephCore V-contact back, for this radio's key or the file's identity.
+            var selfKeys = new List<byte[]>();
+            if (app.SelfInfo?.PublicKey is { } live) selfKeys.Add(live);
+            if (cfg.PublicKey is { } fileKeyHex && Bytes.FromHex(fileKeyHex) is { Length: 32 } fileKey) selfKeys.Add(fileKey);
             foreach (var c in cfg.Contacts)
             {
+                if (VContactIdentity.IsVContact(c.PublicKey, selfKeys)) continue;
                 contacts.Add(ToMeshContact(c));
             }
+        }
 
         if (sections.HasFlag(ConfigSections.Position) && cfg.PositionSettings is { } pos)
         {

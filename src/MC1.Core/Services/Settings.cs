@@ -47,8 +47,17 @@ public sealed class AppSettings
     public bool ShowHeardRepeats { get; set; } = true;
     public bool SendOnEnter { get; set; } = true;
     public bool UseTwentyFourHourTime { get; set; }
-    public int DmMaxAttempts { get; set; } = 5;
-    public int DmFloodAfter { get; set; } = 4;
+    /// <summary>Direct message attempts on the contact's known path (1–4), see <see cref="DmSendBudget"/>.</summary>
+    public int DmDirectAttempts { get; set; } = DmSendBudget.DefaultDirectAttempts;
+    /// <summary>Flood attempts after the path is cleared (0 = "Fall back to flood" off, 1–4).</summary>
+    public int DmFloodAttempts { get; set; } = DmSendBudget.DefaultFloodAttempts;
+    /// <summary>Sign-in, repeater/room commands and contact telemetry: when a direct path gets no reply, clear it and try
+    /// once by flood ("Path fallback").</summary>
+    public bool RemoteFloodFallback { get; set; } = true;
+
+    // Blocks & filters
+    /// <summary>Word or phrase rules that hide incoming messages, and which chats they apply to.</summary>
+    public TextRulesPreference TextRules { get; set; } = new();
 
     // Notifications
     public bool NotificationsEnabled { get; set; } = true;

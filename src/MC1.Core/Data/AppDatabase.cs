@@ -180,7 +180,7 @@ public sealed partial class AppDatabase
     {
         using var c = Open();
         using var tx = c.BeginTransaction();
-        foreach (var table in new[] { "Reactions", "Messages", "Contacts", "DiscoveredNodes", "Channels", "RxLog", "RemoteSessions", "NodeSnapshots", "TracePaths", "BlockedSenders" })
+        foreach (var table in new[] { "Reactions", "Messages", "Contacts", "DiscoveredNodes", "Channels", "RxLog", "RemoteSessions", "NodeSnapshots", "TracePaths", "BlockedSenders", "RecentlyBlocked" })
             c.Execute($"DELETE FROM {table} WHERE RadioId=@radioId", new { radioId }, tx);
         c.Execute("DELETE FROM Radios WHERE Id=@radioId", new { radioId }, tx);
         tx.Commit();

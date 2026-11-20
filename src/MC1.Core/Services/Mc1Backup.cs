@@ -621,6 +621,9 @@ public sealed class Mc1Backup
         ["notifyNewContacts"] = s.NotifyNewContacts,
         ["notificationSoundEnabled"] = s.NotificationSound,
         ["notifyLowBattery"] = s.NotifyLowBattery,
+        ["dmDirectAttempts"] = DmSendBudget.ClampDirect(s.DmDirectAttempts),
+        ["dmFloodAttempts"] = DmSendBudget.ClampFlood(s.DmFloodAttempts),
+        ["remoteFloodFallback"] = s.RemoteFloodFallback,
     };
 
     // MARK: Restore
@@ -788,6 +791,9 @@ public sealed class Mc1Backup
             if (u["notifyNewContacts"] is JsonValue g) s.NotifyNewContacts = Bool(g);
             if (u["notificationSoundEnabled"] is JsonValue h) s.NotificationSound = Bool(h);
             if (u["notifyLowBattery"] is JsonValue i) s.NotifyLowBattery = Bool(i);
+            if (u["dmDirectAttempts"] is JsonValue da) s.DmDirectAttempts = DmSendBudget.ClampDirect((int)Num(da, DmSendBudget.DefaultDirectAttempts));
+            if (u["dmFloodAttempts"] is JsonValue fa) s.DmFloodAttempts = DmSendBudget.ClampFlood((int)Num(fa, DmSendBudget.DefaultFloodAttempts));
+            if (u["remoteFloodFallback"] is JsonValue rf) s.RemoteFloodFallback = Bool(rf);
             if (u["regionSelection"] is JsonObject region && Str(region["countryCode"]) is { Length: 2 } country)
             {
                 s.PresetCountry = country.ToUpperInvariant();

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.0
+
+Brings the Windows app up to date with MeshCore One 1.7.1 (from 1.6.2).
+
+**New**
+- Blocks & filters (Settings ▸ Blocks & filters): word or phrase rules that hide incoming messages, looking at the message, the sender's name or both, matching anywhere or only the whole text. Choose the kinds of chat (public and hashtag channels on by default; private channels, direct messages and rooms optional) and all or some chats of each. Hidden messages aren't saved, notified or counted as unread; reactions from a hidden sender are hidden too. The latest 100 are listed under *Recently blocked* on this PC (not in backups).
+- Direct messages try the known path 4 times, then clear it and try 4 times by flood. *Attempts on Path*, *Flood Attempts* and *Fall Back to Flood* in Settings ▸ Chats ▸ Delivery (advanced); room posts use the same budget. The settings are in backups under the iPhone app's names.
+- Path fallback switch: sign-in, remote commands and contact telemetry clear a path that gets no reply and try once by flood (sign-in now does this too), or keep the path when it's off.
+- Node telemetry of the connected radio on the Radio page, with the time of the last successful reading.
+- Sensor management: list a sensor's settings, change one with read-back verification, and send a reboot request (Sensor tab, admin sign-in).
+- MECP (Mesh Emergency Communication Protocol) messages read as phrases in the app's language in chats, the chat list and notifications, with the original text under them. MECP language packs (CC BY 4.0) included. The demo radio has an `#emergency` channel.
+- Telemetry temperature, pressure and altitude follow the *Metric units* setting.
+
+**Fixed**
+- ZephCore's virtual V-contact is left out of exported configuration files and never written back on import.
+
+Database schema v3 (adds the *Recently blocked* table); existing data is kept.
+
 ## 1.1.0
 
 Brings the Windows app up to date with MeshCore One 1.6.2 (from 1.5.1).

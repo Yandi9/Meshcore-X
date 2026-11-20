@@ -6,6 +6,7 @@
 - Swift MeshCore: the protocol library supplied within MeshCore One — MIT; original supplied notice is reproduced verbatim in `licenses/Swift-MeshCore-MIT.txt`. Its copyright line names a year but no author; no author has been invented.
 - MeshCore firmware and protocol community: https://github.com/meshcore-dev/MeshCore.
 - meshcore_py, credited by the upstream protocol library: https://github.com/meshcore-dev/meshcore_py.
+- MECP (Mesh Emergency Communication Protocol) language packs, as bundled by MeshCore One 1.7 (`src/MC1.Core/Mecp/Languages`): Creative Commons Attribution 4.0 International; license text in `licenses/MECP-LANGUAGES-CC-BY-4.0.txt`. The packs are used unchanged; only the English, German, Spanish, French, Italian, Dutch, Polish and Portuguese packs are included.
 - Desktop adaptation: YndreW.
 
 ## Images, icons and map services

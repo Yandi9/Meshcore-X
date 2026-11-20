@@ -104,7 +104,9 @@ public sealed class SimulatedRadio : IMeshTransport
         newcomer.InContacts = false;
         _channels[0] = ("Public", ChannelSecrets.PublicChannelSecret);
         _channels[1] = ("#test", ChannelSecrets.HashSecret("#test"));
-        for (var i = 2; i < _channels.Length; i++) _channels[i] = ("", new byte[16]);
+        // MECP (Mesh Emergency Communication Protocol) readings without a radio, as in MeshCore One 1.7's simulator.
+        _channels[2] = ("#emergency", ChannelSecrets.HashSecret("#emergency"));
+        for (var i = 3; i < _channels.Length; i++) _channels[i] = ("", new byte[16]);
         var now = Bytes.NowEpoch();
         foreach (var n in _nodes) { n.LastAdvert = now - (uint)_rng.Next(60, 7200); n.LastModified = now - 3600; }
         lock (_lock)
@@ -112,6 +114,12 @@ public sealed class SimulatedRadio : IMeshTransport
             QueueContactMessage(_nodes[0], "Hey! Welcome to the MeshCore demo 👋", now - 600);
             QueueChannelMessage(0, "Bob", "Morning mesh! Anyone hearing the new repeater?", now - 900);
             QueueChannelMessage(1, "Alice", "Testing 1-2-3 on #test", now - 300);
+            // MECP/5/M01 has no such severity, so it stays ordinary text.
+            QueueChannelMessage(2, "Alice", "MECP/0/M01 M02 T04 3pax 37.7849,-122.4094 @1430 @en", now - 800);
+            QueueChannelMessage(2, "Bob", "MECP/1/R03 15", now - 500);
+            QueueChannelMessage(2, "Dave", "MECP/5/M01", now - 300);
+            QueueChannelMessage(2, "Frank", "MECP/3/H07 4pax", now - 40);
+            QueueChannelMessage(2, "Carol", "MECP/2/P03 S01 2pax", now - 10);
         }
     }
 
@@ -536,13 +544,47 @@ public sealed class SimulatedRadio : IMeshTransport
         return w.ToArray();
     }
 
+    /// <summary>A sensor's custom settings (CommonCLI <c>sensor list/get/set</c>), in the firmware's order.</summary>
+    private readonly List<KeyValuePair<string, string>> _sensorVars =
+        [new("gps", "1"), new("gps.interval", "900"), new("temp.offset", "0.0"), new("report.interval", "300")];
+
+    /// <summary>Replies to sensor management commands (two settings per page, like a long list), or null for other commands.</summary>
+    private string? SensorCli(Node node, string body)
+    {
+        var parts = body.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2 || parts[0] != "sensor") return null;
+        switch (parts[1])
+        {
+            case "list":
+            {
+                var offset = parts.Length > 2 && int.TryParse(parts[2], out var o) ? o : 0;
+                if (_sensorVars.Count == 0) return "no custom var";
+                var page = _sensorVars.Skip(offset).Take(2).ToList();
+                var lines = new List<string> { $"{_sensorVars.Count} vars" };
+                lines.AddRange(page.Select(kv => $"{kv.Key}={kv.Value}"));
+                if (offset + page.Count < _sensorVars.Count) lines.Add($"... next:{offset + page.Count}");
+                return string.Join('\n', lines);
+            }
+            case "get" when parts.Length == 3:
+                return _sensorVars.FirstOrDefault(kv => kv.Key == parts[2]) is { Key: not null } v ? "> " + v.Value : "null";
+            case "set" when parts.Length == 4:
+            {
+                var i = _sensorVars.FindIndex(kv => kv.Key == parts[2]);
+                if (i < 0) return "can't find custom var";
+                _sensorVars[i] = new(parts[2], parts[3]);
+                return "ok";
+            }
+            default: return null;
+        }
+    }
+
     private void HandleCli(Node node, string text)
     {
         string? prefix = null;
         var body = text;
         if (CliResponse.SplitEchoedPrefix(text) is { } s) { prefix = s.Prefix; body = s.Body; }
         var cmd = body.Trim().ToLowerInvariant();
-        var reply = cmd switch
+        var reply = node.Type == ContactType.Sensor && SensorCli(node, body.Trim()) is { } sensorReply ? sensorReply : cmd switch
         {
             "ver" => "v1.16.0-sim (Build: 29-Sep-2026)",
             "get name" => node.Name,

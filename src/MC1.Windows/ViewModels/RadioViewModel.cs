@@ -83,6 +83,10 @@ public sealed partial class RadioViewModel : ViewModelBase
     [ObservableProperty] private bool _supportsAutoAddConfig;
     [ObservableProperty] private bool _supportsAutoAddMaxHops;
     public ObservableCollection<DetailRow> Stats { get; } = new();
+    /// <summary>Telemetry of the connected radio itself (battery, temperature, GPS…), as in MeshCore One 1.7's Device Info.</summary>
+    public ObservableCollection<DetailRow> NodeTelemetry { get; } = new();
+    [ObservableProperty] private string? _nodeTelemetryTime;
+    [ObservableProperty] private string? _nodeTelemetryNote;
 
     [ObservableProperty] private bool _isConnected;
     [ObservableProperty] private string _deviceName = "";
@@ -276,8 +280,26 @@ public sealed partial class RadioViewModel : ViewModelBase
             }
             catch { RepeatRanges = ""; }
             await RefreshStats();
+            await RefreshTelemetry();
         }
         finally { Busy = false; }
+    }
+
+    /// <summary>Reads the connected radio's own telemetry. The last successful reading stays shown if a later one fails.</summary>
+    [RelayCommand]
+    private async Task RefreshTelemetry()
+    {
+        if (!Core.IsConnected) return;
+        try
+        {
+            var t = await Core.Device.GetSelfTelemetryAsync();
+            var metric = Core.Settings.Current.UseMetricUnits;
+            NodeTelemetry.Clear();
+            foreach (var p in t.DataPoints) NodeTelemetry.Add(new DetailRow(L.F("{0} · ch {1}", TelemetryFormat.Label(p), p.Channel), TelemetryFormat.Value(p, metric)));
+            NodeTelemetryTime = L.F("Last successful reading: {0}", Formatters.Clock(DateTimeOffset.Now));
+            NodeTelemetryNote = NodeTelemetry.Count == 0 ? L.T("The radio reported no telemetry.") : null;
+        }
+        catch (Exception ex) { NodeTelemetryNote = L.F("Couldn't read telemetry: {0}", ex.Message); }
     }
 
     [RelayCommand]

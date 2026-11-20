@@ -311,6 +311,29 @@
             </ItemsControl>
           </Border>
 
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Classes="section" Text="{l:T 'NODE TELEMETRY'}" />
+            <Button Grid.Column="1" Classes="link" Content="{l:T 'Refresh'}" Command="{Binding RefreshTelemetryCommand}" VerticalAlignment="Bottom" Margin="0,0,0,6" />
+          </Grid>
+          <Border Classes="group">
+            <StackPanel>
+              <ItemsControl ItemsSource="{Binding NodeTelemetry}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:DetailRow">
+                    <Grid ColumnDefinitions="200,*" MinHeight="30">
+                      <TextBlock Text="{Binding Label}" Classes="secondary" VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="1" Text="{Binding Value}" VerticalAlignment="Center" />
+                    </Grid>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <TextBlock Classes="hint" Margin="0,6" Text="{Binding NodeTelemetryNote}" TextWrapping="Wrap"
+                         IsVisible="{Binding NodeTelemetryNote, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+              <TextBlock Classes="caption" Margin="0,4,0,8" Text="{Binding NodeTelemetryTime}"
+                         IsVisible="{Binding NodeTelemetryTime, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            </StackPanel>
+          </Border>
+
           <TextBlock Classes="section" Text="{l:T 'IDENTITY KEYS'}" />
           <Border Classes="group" Padding="16,10">
             <StackPanel Spacing="8">

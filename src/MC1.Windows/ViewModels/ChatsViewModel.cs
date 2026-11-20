@@ -210,6 +210,7 @@ public sealed partial class ChatsViewModel : ViewModelBase
 
     private static string OneLine(string s)
     {
+        s = MC1.Core.Mecp.MecpCatalog.DisplayText(s);
         // Shared contacts show as "Contact: name" rather than their long key.
         if (s.Contains('<')) s = string.Concat(LinkDetector.Tokenize(s).Select(t => t.Text));
         var t = s.Replace('\n', ' ').Replace('\r', ' ');

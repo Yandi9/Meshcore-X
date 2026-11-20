@@ -31,6 +31,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [
         new("general", L.T("General"), "Icon.CogOutline"),
         new("chats", L.T("Chats"), "Icon.ChatOutline"),
+        new("filters", L.T("Blocks & filters"), "Icon.FilterVariant"),
         new("looks", L.T("Chat looks"), "Icon.PaletteOutline"),
         new("notifications", L.T("Notifications"), "Icon.BellOutline"),
         new("data", L.T("Backup & storage"), "Icon.DatabaseExport"),
@@ -42,7 +43,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     partial void OnSelectedCategoryChanged(SettingsCategory value)
     {
-        foreach (var n in (string[])[nameof(IsGeneral), nameof(IsChats), nameof(IsLooks), nameof(IsNotifications), nameof(IsData), nameof(IsDiagnostics), nameof(IsAbout)])
+        foreach (var n in (string[])[nameof(IsGeneral), nameof(IsChats), nameof(IsFilters), nameof(IsLooks), nameof(IsNotifications), nameof(IsData), nameof(IsDiagnostics), nameof(IsAbout)])
             OnPropertyChanged(n);
         Message = null;
         if (value.Id == "notifications") RefreshWidget();
@@ -50,6 +51,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     public bool IsGeneral => SelectedCategory?.Id == "general";
     public bool IsChats => SelectedCategory?.Id == "chats";
+    public bool IsFilters => SelectedCategory?.Id == "filters";
     public bool IsLooks => SelectedCategory?.Id == "looks";
     public bool IsNotifications => SelectedCategory?.Id == "notifications";
     public bool IsData => SelectedCategory?.Id == "data";
@@ -97,7 +99,12 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     /// <summary>The theme picker's options (shown text, same order as <see cref="ThemeValues"/>).</summary>
     public IReadOnlyList<string> Themes => _themeLabels;
-    public IReadOnlyList<int> AttemptOptions { get; } = [1, 2, 3, 4, 5, 6, 8];
+    public IReadOnlyList<int> DirectAttemptOptions { get; } = DmSendBudget.DirectChoices;
+    public IReadOnlyList<int> FloodAttemptOptions { get; } = DmSendBudget.FloodChoices;
+
+    /// <summary>Settings ▸ Blocks &amp; filters.</summary>
+    public BlocksFiltersViewModel Filters => _filters ??= new BlocksFiltersViewModel();
+    private BlocksFiltersViewModel? _filters;
     public string Version { get; }
     public string DataFolder => AppPaths.Root;
 
@@ -116,8 +123,29 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [ObservableProperty] private bool _showHeardRepeats;
     [ObservableProperty] private bool _sendOnEnter;
     [ObservableProperty] private bool _useTwentyFourHourTime;
-    [ObservableProperty] private int _dmMaxAttempts;
-    [ObservableProperty] private int _dmFloodAfter;
+    [ObservableProperty] private int _dmDirectAttempts;
+    [ObservableProperty] private int _dmFloodAttempts;
+    [ObservableProperty] private bool _dmFallbackToFlood;
+    [ObservableProperty] private bool _remoteFloodFallback;
+
+    /// <summary>What the direct message attempts do, for the settings they're on.</summary>
+    public string DmAttemptsHint => DmFallbackToFlood
+        ? L.T("The route is cleared after Attempts on Path. Flood Attempts are sent by flood after that. A contact with no known route is sent by flood.")
+        : L.T("Attempts on Path stay on the known route, and the route is left in place. A contact with no known route is sent by flood.");
+
+    public string PathFallbackHint => RemoteFloodFallback
+        ? L.T("Sign-in, repeater and room commands that expect a reply, and contact telemetry use the known route. If there is no reply, the route is cleared and tried once by flood.")
+        : L.T("Sign-in, commands, and contact telemetry stay on the known route. If there is no reply, they stop and the route stays.");
+
+    partial void OnDmFallbackToFloodChanged(bool value)
+    {
+        OnPropertyChanged(nameof(DmAttemptsHint));
+        if (_loading) return;
+        var stored = DmSendBudget.FloodAttemptsFor(value, Core.Settings.Current.DmFloodAttempts);
+        if (value) DmFloodAttempts = DmSendBudget.MenuFloodAttempts(stored);
+    }
+
+    partial void OnRemoteFloodFallbackChanged(bool value) => OnPropertyChanged(nameof(PathFallbackHint));
     [ObservableProperty] private bool _notificationsEnabled;
     [ObservableProperty] private bool _notifyDirectMessages;
     [ObservableProperty] private bool _notifyChannelMessages;
@@ -298,8 +326,10 @@ public sealed partial class SettingsViewModel : ViewModelBase
         ShowHeardRepeats = s.ShowHeardRepeats;
         SendOnEnter = s.SendOnEnter;
         UseTwentyFourHourTime = s.UseTwentyFourHourTime;
-        DmMaxAttempts = s.DmMaxAttempts;
-        DmFloodAfter = s.DmFloodAfter;
+        DmDirectAttempts = DmSendBudget.ClampDirect(s.DmDirectAttempts);
+        DmFallbackToFlood = s.DmFloodAttempts > 0;
+        DmFloodAttempts = DmSendBudget.MenuFloodAttempts(s.DmFloodAttempts);
+        RemoteFloodFallback = s.RemoteFloodFallback;
         NotificationsEnabled = s.NotificationsEnabled;
         NotifyDirectMessages = s.NotifyDirectMessages;
         NotifyChannelMessages = s.NotifyChannelMessages;
@@ -331,7 +361,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         base.OnPropertyChanged(e);
         if (_loading || e.PropertyName is nameof(TileCacheSize) or nameof(Message) or nameof(DefaultAppearance) or nameof(HasDefaultAppearance)
             or nameof(ChatToCustomize) or nameof(CustomizedSummary) or nameof(SelectedCategory) or nameof(CompactSidebar) or nameof(NoCustomizedChats)
-            or nameof(StartWithWindows) or nameof(CanTransfer) or nameof(CanRestore) or nameof(PendingSummary) or nameof(HasPendingRadioWrite) or nameof(CanApplyPending)
+            or nameof(StartWithWindows) or nameof(CanTransfer) or nameof(CanRestore) or nameof(PendingSummary) or nameof(DmAttemptsHint) or nameof(PathFallbackHint) or nameof(HasPendingRadioWrite) or nameof(CanApplyPending)
             or nameof(LockScreenStatus) or nameof(HasWidget) or nameof(RadioSummary) or nameof(RadioSummaryTitle) or nameof(HasRadioSummary)
             || e.PropertyName?.StartsWith("Is") == true || e.PropertyName?.StartsWith("Widget") == true) return;
         if (e.PropertyName == nameof(ChatThemesEnabled)) { ChatThemes.Enabled = ChatThemesEnabled; return; }
@@ -351,8 +381,9 @@ public sealed partial class SettingsViewModel : ViewModelBase
             s.ShowHeardRepeats = ShowHeardRepeats;
             s.SendOnEnter = SendOnEnter;
             s.UseTwentyFourHourTime = UseTwentyFourHourTime;
-            s.DmMaxAttempts = Math.Clamp(DmMaxAttempts, 1, 8);
-            s.DmFloodAfter = Math.Clamp(DmFloodAfter, 1, 8);
+            s.DmDirectAttempts = DmSendBudget.ClampDirect(DmDirectAttempts);
+            s.DmFloodAttempts = DmFallbackToFlood ? DmSendBudget.FloodAttemptsFor(true, DmFloodAttempts) : 0;
+            s.RemoteFloodFallback = RemoteFloodFallback;
             s.NotificationsEnabled = NotificationsEnabled;
             s.NotifyDirectMessages = NotifyDirectMessages;
             s.NotifyChannelMessages = NotifyChannelMessages;

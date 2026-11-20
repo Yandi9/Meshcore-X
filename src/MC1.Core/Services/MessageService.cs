@@ -84,6 +84,8 @@ public sealed class MessageService
         if (contact is not null)
         {
             _app.Db.TouchContactHeard(radioId, contact.PublicKey, Time.Now());
+            if (_app.TextRules.ShouldHide(TextRuleKind.DirectMessage, TextRules.ConversationKey(radioId, contact), contact.DisplayName,
+                    text, contact.DisplayName, LooksLikeReaction(text, isDm: true), dedup)) return;
             if (HandleDmReaction(text, contact, radioId)) return;
         }
 
@@ -122,7 +124,7 @@ public sealed class MessageService
             else _app.Db.ClearContactUnread(contact.Id);
             var s = _app.Settings.Current;
             if (s.NotificationsEnabled && s.NotifyDirectMessages && !contact.IsMuted && !IsConversationOpen(DmKey(contact.Id)))
-                _app.Notifier.ShowMessage(contact.DisplayName, text, DmKey(contact.Id), allowReply: true);
+                _app.Notifier.ShowMessage(contact.DisplayName, Mecp.MecpCatalog.DisplayText(text), DmKey(contact.Id), allowReply: true);
         }
         _app.Notify(DataKind.Messages, DmKey(contact.Id), msg.Id);
         _app.Notify(DataKind.Conversations);
@@ -141,6 +143,8 @@ public sealed class MessageService
         var existing = _app.Db.GetMessageByDedup(radioId, dedup);
         if (existing is not null) return;
         if (sender is not null && IsBlockedSender(radioId, sender)) return;
+        if (channel is not null && _app.TextRules.ShouldHide(TextRules.ChannelKind(channel), TextRules.ConversationKey(radioId, channel),
+                channel.DisplayName, text, sender, LooksLikeReaction(text, isDm: false), dedup)) return;
         if (HandleChannelReaction(text, m.ChannelIndex, sender, radioId)) return;
 
         var selfName = _app.SelfName;
@@ -176,11 +180,15 @@ public sealed class MessageService
         var level = (NotificationLevel)(channel?.NotificationLevel ?? 0);
         if (channel is not null && s.NotificationsEnabled && s.NotifyChannelMessages && !IsConversationOpen(key) &&
             (level == NotificationLevel.All || (level == NotificationLevel.MentionsOnly && mention)))
-            _app.Notifier.ShowMessage($"{channel.DisplayName}", sender is null ? text : $"{sender}: {text}", key, allowReply: true);
+            _app.Notifier.ShowMessage($"{channel.DisplayName}", sender is null ? Mecp.MecpCatalog.DisplayText(text) : $"{sender}: {Mecp.MecpCatalog.DisplayText(text)}", key, allowReply: true);
         _app.Notify(DataKind.Messages, key, msg.Id);
         _app.Notify(DataKind.Conversations);
         UpdateBadge();
     }
+
+    /// <summary>Reaction text in any of the formats this app reads (filter rules check only a reaction's sender).</summary>
+    internal static bool LooksLikeReaction(string text, bool isDm) =>
+        ReactionParser.IsReactionText(text, isDm) || MeshCoreOpenReactionParser.Parse(text) is not null || MeshCoreOpenReactionParser.ParseV1(text) is not null;
 
     private readonly ConcurrentDictionary<string, HashSet<string>> _blockedCache = new();
 
@@ -358,7 +366,7 @@ public sealed class MessageService
             Direction = (int)MessageDirection.Outgoing,
             Status = (int)MessageStatus.Pending,
             ReplyToId = replyToId,
-            MaxRetryAttempts = _app.Settings.Current.DmMaxAttempts - 1,
+            MaxRetryAttempts = DmSendBudget.From(_app.Settings.Current).TotalAttempts - 1,
         };
         _app.Db.SaveMessage(msg);
         _app.Db.UpdateContactLastMessage(contact.Id, Time.Now());
@@ -401,14 +409,12 @@ public sealed class MessageService
             if (preserveTimestamp) ts = (uint)msg.Timestamp;
             else { ts = Bytes.NowEpoch(); _app.Db.UpdateMessageTimestamp(messageId, ts); }
             var wireTime = DateTimeOffset.FromUnixTimeSeconds(ts);
-            var settings = _app.Settings.Current;
-            var maxAttempts = Math.Clamp(settings.DmMaxAttempts, 1, 5);
-            var floodAfter = Math.Clamp(settings.DmFloodAfter, 1, maxAttempts);
+            // Attempts on the known path, then (with "Fall back to flood") the path is cleared once and the flood attempts follow.
+            var budget = DmSendBudget.From(_app.Settings.Current);
+            var maxAttempts = budget.TotalAttempts;
             var pending = new PendingAck { MessageId = messageId, ContactId = contactId };
             _pendingAcks[messageId] = pending;
             var attempts = 0;
-            var floodAttempts = 0;
-            var isFlood = false;
             MessageSentInfo? lastSent = null;
             var initialPathLen = contact.OutPathLength;
 
@@ -427,7 +433,7 @@ public sealed class MessageService
                 _app.Log.Info("Messages", $"DM to {contact.DisplayName} interrupted by the disconnect; it stays queued");
             }
 
-            while (attempts < maxAttempts && (!isFlood || floodAttempts < 1))
+            while (attempts < maxAttempts)
             {
                 if (pending.Delivered) break;
                 if (attempts > 0)
@@ -435,8 +441,7 @@ public sealed class MessageService
                     _app.Db.UpdateMessageRetry(messageId, MessageStatus.Retrying, attempts - 1, maxAttempts - 1);
                     Updated(messageId, key);
                 }
-                if (attempts == floodAfter && !isFlood && contact.IsFloodRouted) isFlood = true;
-                if (attempts == floodAfter && !isFlood)
+                if (budget.ResetsPathBefore(attempts) && !(_app.Db.GetContact(contactId) ?? contact).IsFloodRouted)
                 {
                     try
                     {
@@ -447,7 +452,6 @@ public sealed class MessageService
                         _app.Notify(DataKind.Contacts);
                     }
                     catch (Exception ex) { _app.Log.Warn("Messages", "Path reset failed: " + ex.Message); }
-                    isFlood = true;
                 }
                 var predicted = AckCodeBuilder.ExpectedAck(ts, (byte)attempts, msg.Text, session.SelfInfo!.PublicKey);
                 pending.Codes.Add(predicted.ToHex());
@@ -479,7 +483,6 @@ public sealed class MessageService
                     await Task.Delay(100).ConfigureAwait(false);
                 if (pending.Delivered) break;
                 attempts++;
-                if (isFlood) floodAttempts++;
                 if (!session.IsRunning || pending.Interrupted) break;
             }
 

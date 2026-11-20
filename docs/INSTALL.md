@@ -1,6 +1,6 @@
-# Installing MeshCore for Windows 1.1.0
+# Installing MeshCore for Windows 1.2.0
 
-1. Choose `MeshCore-1.1.0-win-x64.zip` for Intel/AMD PCs, or `MeshCore-1.1.0-win-arm64.zip` for Windows on ARM.
+1. Choose `MeshCore-1.2.0-win-x64.zip` for Intel/AMD PCs, or `MeshCore-1.2.0-win-arm64.zip` for Windows on ARM.
 2. Extract the entire ZIP to a folder you control.
 3. Open `MeshCore-x64.exe` or `MeshCore-arm64.exe`. The app is self-contained; you do not need the source files or a separate .NET runtime.
 

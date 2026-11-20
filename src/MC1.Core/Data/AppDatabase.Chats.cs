@@ -11,7 +11,7 @@ public sealed record ReactionAdmission(string MessageId, string? Summary, bool I
 public sealed partial class AppDatabase
 {
     /// <summary>The newest schema this build knows (PRAGMA user_version).</summary>
-    public const int SchemaVersion = 2;
+    public const int SchemaVersion = 3;
 
     /// <summary>Reactions counted in a message's summary (the most recent ones), like the iPhone app.</summary>
     public const int ReactionSummaryRowLimit = 100;
@@ -44,6 +44,18 @@ public sealed partial class AppDatabase
             // One-time copy (like the iPhone app): contacts that are favourites now start pinned. A favourite set
             // after this stays unpinned; the step's version bump records that the copy was made.
             c.Execute("UPDATE Contacts SET IsPinned=1 WHERE (Flags & @fav) <> 0", new { fav = (int)MeshCore.ContactFlags.Favorite }, tx);
+        });
+        if (version < 3) Step(c, 3, tx =>
+        {
+            // Messages hidden by a filter rule ("Recently blocked"); kept on this PC only, never in backups.
+            c.Execute("""
+                CREATE TABLE IF NOT EXISTS RecentlyBlocked(
+                    Id TEXT PRIMARY KEY, RadioId TEXT NOT NULL, RadioName TEXT, ConversationKey TEXT NOT NULL, ConversationName TEXT,
+                    Sender TEXT, Body TEXT NOT NULL DEFAULT '', ArrivedAt INTEGER DEFAULT 0, RulePhrase TEXT NOT NULL DEFAULT '',
+                    RuleLookIn INTEGER DEFAULT 0, RuleMatch INTEGER DEFAULT 0, DedupKey TEXT NOT NULL DEFAULT '');
+                CREATE INDEX IF NOT EXISTS IX_RecentlyBlocked_Arrived ON RecentlyBlocked(ArrivedAt);
+                CREATE UNIQUE INDEX IF NOT EXISTS IX_RecentlyBlocked_Dedup ON RecentlyBlocked(RadioId, ConversationKey, DedupKey);
+                """, transaction: tx);
         });
     }
 

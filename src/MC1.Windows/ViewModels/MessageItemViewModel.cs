@@ -42,6 +42,9 @@ public sealed partial class MessageItemViewModel : ObservableObject
     public string? MapUri { get; private set; }
     public string? FirstUrl { get; private set; }
     public bool IsImageUrl { get; private set; }
+    /// <summary>"MECP: &lt;wire text&gt;" when the message is an MECP emergency message (shown under its reading).</summary>
+    public string? MecpDetail { get; private set; }
+    public bool IsMecp => MecpDetail is not null;
 
     [ObservableProperty] private string? _dayHeader;
     [ObservableProperty] private bool _showSender;
@@ -122,8 +125,12 @@ public sealed partial class MessageItemViewModel : ObservableObject
     {
         if (text == Text && Tokens.Count > 0) return;
         Text = text;
-        var match = ReplyRegex.Match(text);
-        if (match.Success)
+        // An MECP emergency message reads as phrases in the app's language; the wire text stays in the details.
+        var reading = MC1.Core.Mecp.MecpCatalog.Reading(text);
+        MecpDetail = reading is null ? null : L.F("MECP: {0}", text);
+        var match = reading is null ? ReplyRegex.Match(text) : Match.Empty;
+        if (reading is not null) Body = reading;
+        else if (match.Success)
         {
             QuoteName = match.Groups[1].Value;
             QuoteText = match.Groups[2].Value;

@@ -84,9 +84,11 @@ public sealed class RoomService(MeshApp app)
         try
         {
             var session = app.RequireSession();
-            var s = app.Settings.Current;
+            // Room posts use the same budget as direct messages.
+            var budget = DmSendBudget.From(app.Settings.Current);
             await app.Channels.ApplyFloodScopeAsync(null).ConfigureAwait(false);
-            var sent = await session.SendMessageWithRetryAsync(room.PublicKey, msg.Text, timestamp, Math.Clamp(s.DmMaxAttempts, 1, 5), Math.Clamp(s.DmFloodAfter, 1, 5), 1).ConfigureAwait(false);
+            var sent = await session.SendMessageWithRetryAsync(room.PublicKey, msg.Text, timestamp, budget.TotalAttempts,
+                budget.FallsBackToFlood ? budget.DirectAttempts : int.MaxValue, Math.Max(1, budget.FloodAttempts)).ConfigureAwait(false);
             app.Db.UpdateRoomMessageStatus(msg.Id, sent is not null ? MessageStatus.Delivered : MessageStatus.Sent, sent?.AckCodeUInt32);
             app.Db.UpdateRoomActivity(room.Id);
         }
@@ -121,6 +123,8 @@ public sealed class RoomService(MeshApp app)
         var selfPrefix = app.SelfInfo?.PublicKey.Prefix(4);
         var isSelf = selfPrefix is not null && selfPrefix.SequenceEquals(author);
         var authorName = isSelf ? app.SelfName : ResolveAuthor(radioId, author);
+        if (!isSelf && app.TextRules.ShouldHide(TextRuleKind.Room, TextRules.ConversationKey(radioId, room), room.Name, m.Text, authorName,
+                isReaction: false, dedup)) return;
         var msg = new RoomMessageRecord
         {
             SessionId = room.Id,
@@ -136,7 +140,7 @@ public sealed class RoomService(MeshApp app)
         app.Db.UpdateRoomActivity(room.Id, ts, incrementUnread: !isSelf && !app.Messages.IsSeenOnArrival(key));
         var st = app.Settings.Current;
         if (!isSelf && st.NotificationsEnabled && st.NotifyRoomMessages && room.NotificationLevel != (int)NotificationLevel.Muted && !app.Messages.IsConversationOpen(key))
-            app.Notifier.ShowMessage(room.Name, $"{authorName}: {m.Text}", key, allowReply: room.CanPost);
+            app.Notifier.ShowMessage(room.Name, $"{authorName}: {Mecp.MecpCatalog.DisplayText(m.Text)}", key, allowReply: room.CanPost);
         app.Notify(DataKind.RoomMessages, room.Id, msg.Id);
         app.Notify(DataKind.Conversations);
         app.Messages.UpdateBadge();

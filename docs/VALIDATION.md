@@ -1,50 +1,40 @@
-# Version 1.1.0 validation
+# Version 1.2.0 validation
 
-Prepared 2026-11-02 with .NET SDK 10.0.403 / .NET 10.0.14. This release updates the app from MeshCore One 1.5.1 to 1.6.2 (upstream commit ecbc8bfd).
+Prepared 2026-11-20 with .NET SDK 10.0.404 / .NET 10.0.15. This release updates the app from MeshCore One 1.6.2 to 1.7.1 (upstream commit 5e980a53).
 
 ## Results
 
 - **Builds** (self-contained Release, single-file, ReadyToRun):
   - Windows x64: succeeded.
-  - Windows ARM64: succeeded. It was cross-compiled and not run on ARM64 hardware.
+  - Windows ARM64: succeeded. The tests and the screenshot harness ran natively on an ARM64 Windows PC; the packaged executables themselves were not started.
   - Cross-platform `net10.0` build: succeeded.
   - One existing compiler warning remains (MVVMTK0034 in the welcome guide); it has no effect.
-- **Protocol tests** (`tests/MeshCore.Tests`): 176 passed, 0 failed. These include the new firmware 1.18 command, reply, power-off and contact/channel frame tests.
-- **Application tests** (`tests/MC1.Core.Tests`): 271 passed, 0 failed. They run end to end against the simulated radio and include:
-  - pinned chats and the favourites migration;
-  - mark read/unread, drafts, pending direct messages and channel regions on send;
-  - map filters, offline map policy and contact sorting;
-  - favourites confirmed by the radio and discovered paths stored on it;
-  - presets, *Your area* and the line-of-sight maths;
-  - radio WiFi, power off, time zone, Bluetooth/WiFi links and Remote CLI;
-  - restoring an iPhone backup into a connected radio. This sets its preset and frequency, restores pins and *Your area*, and never grants Remote CLI;
-  - the CoreScope link: which pasted links are accepted, the site check and its name, which pages stay in the tab, and saving or removing the link.
-- **Headless screenshot harness** (`tests/MC1.Windows.Screens`): 65 screens each in English (dark), German (light) and Spanish (light), run with the text-overflow check. There were no exceptions and no clipped text. New screens were reviewed by eye, including:
-  - the pinned-chats section and chat menu;
-  - the map filters and offline maps panels;
-  - the radio WiFi, Bluetooth/WiFi switching, Remote CLI and power sections;
-  - the remote commands console;
-  - the restore dialog.
-- **CoreScope tab**: the harness linked a CoreScope in Settings and checked that the tab appears after Map, keeps its page while other tabs are shown, and disappears when the link is removed. It was checked in English, German, Polish and Spanish with no clipped text. The harness has no built-in browser, so the CoreScope site itself (Microsoft Edge WebView2) was not shown here.
-- **Translations**: 1771 strings in each of German, Spanish, French, Italian, Dutch, Polish and Portuguese. No keys are missing and the placeholders were checked.
+- **Protocol tests** (`tests/MeshCore.Tests`): 176 passed, 0 failed.
+- **Application tests** (`tests/MC1.Core.Tests`): 286 passed, 0 failed (271 from 1.1.0, 15 new). They run end to end against the simulated radio. The new tests cover:
+  - the direct message budget (4 attempts on the path, then 4 by flood; clamping; switching the flood fallback off and on);
+  - filter rules: *Contains* and whole-field matching on the message, the sender or both, which chats they apply to, saving them, hiding a matching channel message from the demo radio and listing it under *Recently blocked* (newest 100, no duplicates);
+  - MECP decoding (severity, codes, people, UTC time, ETA, free text) and the English, German and fallback readings;
+  - sensor settings: the `sensor list` pages, `get`/`set` replies, and listing, changing and verifying a setting on the demo radio's sensor;
+  - the ZephCore V-contact key and the telemetry units.
+  - Three existing tests were updated for the demo radio's new `#emergency` channel, and one for database schema v3.
+- **Headless screenshot harness** (`tests/MC1.Windows.Screens`): every screen in English (dark) with the text-overflow check, plus the new screens (Blocks & filters, Delivery settings with and without flood fallback, an `#emergency` chat, node telemetry on the Radio page, the sensor tab) in English, German and Polish. No exceptions and no clipped text. The new screens were reviewed by eye.
+- **Translations**: 68 new strings in each of German, Spanish, French, Italian, Dutch, Polish and Portuguese. 34 come from MeshCore One 1.7's own translations; the rest were written for this release. No keys are missing.
 - **Data and privacy**:
-  - Existing 1.0.0 databases are migrated in place (schema v2) and existing data is kept.
-  - Backups strip the Remote CLI permission flag on export and on restore.
-- **Release ZIPs**: integrity and SHA256 checksums were verified during packaging.
+  - 1.1.0 databases are migrated in place to schema v3 (a new *Recently blocked* table); existing data is kept.
+  - *Recently blocked* stays on this PC and is not written to backups.
+  - The new direct message settings are in backups under the iPhone app's names (`dmDirectAttempts`, `dmFloodAttempts`, `remoteFloodFallback`).
+- **Release ZIPs**: integrity and SHA256 checksums were verified after packaging.
 
 ## Not covered here — check before calling it stable
 
-Firmware 1.18 features (radio CLI, WiFi settings, power off, Bluetooth/WiFi switching, Remote CLI) were tested only against the simulated radio. Check them on a real 1.18 radio. On older firmware they should stay hidden. A test covers this with the simulated radio set to an older protocol version.
+Everything new was tested against the simulated radio only. Check on real hardware:
 
-Also check:
+- direct messages over a real path that fails, to see the path reset and the flood attempts;
+- sign-in to a repeater or room whose stored path is stale (Path fallback on and off);
+- node telemetry from a real companion radio;
+- sensor management with a real MeshCore sensor;
+- MECP messages sent by another MECP-capable app;
+- Bluetooth, USB and WiFi connections, and the x64 build on Intel/AMD hardware;
+- the widget alongside 1.2.0.
 
-- the CoreScope tab with a real CoreScope link (the page, back/forward, links to other sites opening in the web browser, light and dark theme);
-- the x64 and ARM64 builds on their own hardware;
-- Bluetooth, USB and WiFi connections;
-- restoring an iPhone backup to a real radio;
-- offline map downloads over a real connection;
-- the widget alongside 1.1.0.
-
-None of these hardware or installation checks were done here.
-
-The widget MSIX packages are the same signed version 1.2.0.0 packages as in 1.0.0, with their matching public certificate and Microsoft Windows App Runtime 2.5.1.0. No signing private key is distributed.
+The widget MSIX packages are the same signed version 1.2.0.0 packages as in 1.0.0 and 1.1.0, with their matching public certificate and Microsoft Windows App Runtime 2.5.1.0. No signing private key is distributed.

@@ -73,12 +73,14 @@ public partial class IntegrationTests(ITestOutputHelper output)
         Assert.Contains(contacts, c => c.Name == "Town Square" && c.ContactType == ContactType.Room);
 
         var channels = app.Channels.GetAll();
-        Assert.Equal(2, channels.Count);
+        Assert.Equal(3, channels.Count);
         Assert.True(channels[0].IsPublic);
         Assert.Equal("#test", channels[1].Name);
+        Assert.Equal("#emergency", channels[2].Name);
 
-        // Queued: 1 DM from Alice + 2 channel messages.
-        Assert.True(await AppFixture.Eventually(() => app.Db.GetChannelMessages(app.RadioId!, 0).Count == 1 && app.Db.GetChannelMessages(app.RadioId!, 1).Count == 1));
+        // Queued: 1 DM from Alice + 2 channel messages + 5 MECP messages on #emergency.
+        Assert.True(await AppFixture.Eventually(() => app.Db.GetChannelMessages(app.RadioId!, 0).Count == 1 && app.Db.GetChannelMessages(app.RadioId!, 1).Count == 1
+            && app.Db.GetChannelMessages(app.RadioId!, 2).Count == 5));
         var alice = contacts.First(c => c.Name == "Alice");
         var dms = app.Db.GetDirectMessages(alice.Id);
         Assert.Single(dms);
@@ -361,7 +363,7 @@ public partial class IntegrationTests(ITestOutputHelper output)
         var rejoined = await app.Channels.JoinFromUriAsync(uri);
         Assert.Equal(priv.Secret, rejoined.Secret);
         await app.Channels.SyncAsync(CancellationToken.None);
-        Assert.Equal(4, app.Channels.GetAll().Count);
+        Assert.Equal(5, app.Channels.GetAll().Count); // Public, #test, #emergency + the two joined
     }
 
     [Fact]
@@ -388,7 +390,7 @@ public partial class IntegrationTests(ITestOutputHelper output)
         Assert.Equal("Windows Node", cfg.Name);
         Assert.Equal(128, cfg.PrivateKey!.Length);
         Assert.Equal(869618u, cfg.RadioSettings!.Frequency);
-        Assert.Equal(2, cfg.Channels!.Count);
+        Assert.Equal(3, cfg.Channels!.Count);
         Assert.Equal(6, cfg.Contacts!.Count);
         cfg.Name = "Imported";
         await app.NodeConfig.ImportAsync(cfg, ConfigSections.Identity | ConfigSections.Channels);
@@ -422,7 +424,7 @@ public partial class IntegrationTests(ITestOutputHelper output)
         Assert.Empty(backup.BlockedChannelSenders);
         Assert.NotNull(backup.WindowsSettings);
         var cfg = backup.ToNodeConfig(device);
-        Assert.Equal(2, cfg.Channels!.Count);
+        Assert.Equal(3, cfg.Channels!.Count);
         Assert.Equal(6, cfg.Contacts!.Count);
         var dmCount = app.Db.GetDirectMessages(alice.Id).Count;
         Assert.Equal(summary.Messages, backup.Messages.Count);

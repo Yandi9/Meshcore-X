@@ -1,0 +1,122 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:l="using:MC1.Windows.Localization"
+             xmlns:vm="using:MC1.Windows.ViewModels"
+             xmlns:ctl="using:MC1.Windows.Controls"
+             xmlns:conv="using:MC1.Windows.Converters"
+             x:Class="MC1.Windows.Views.BlocksFiltersView"
+             x:DataType="vm:BlocksFiltersViewModel">
+  <!-- Settings ▸ Blocks & filters: phrase rules that hide incoming messages (MeshCore One 1.7). -->
+  <StackPanel>
+    <TextBlock Classes="pagehint" Text="{l:T 'Hide messages that match a word or phrase. A rule can look at the message, the sender\'s name, or both, and you choose which chats it applies to. Blocked contacts and channel senders are in Contacts ▸ Blocked.'}" />
+
+    <!-- Rules -->
+    <TextBlock Classes="groupname" Text="{l:T 'Filter rules'}" />
+    <Border Classes="group">
+      <StackPanel>
+        <TextBlock Classes="hint" Margin="0,10" Text="{l:T 'No filter rules'}" IsVisible="{Binding !HasRules}" />
+        <ItemsControl ItemsSource="{Binding Rules}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:TextRuleRow">
+              <Grid ColumnDefinitions="*,Auto" Margin="0,6">
+                <StackPanel VerticalAlignment="Center">
+                  <TextBlock Text="{Binding Phrase}" TextWrapping="Wrap" FontWeight="SemiBold" />
+                  <TextBlock Text="{Binding Summary}" Classes="caption" />
+                </StackPanel>
+                <Button Grid.Column="1" Classes="icon" ToolTip.Tip="{l:T 'Delete'}" VerticalAlignment="Center"
+                        Command="{Binding $parent[ItemsControl].((vm:BlocksFiltersViewModel)DataContext).DeleteRuleCommand}" CommandParameter="{Binding}">
+                  <PathIcon Classes="small" Data="{DynamicResource Icon.TrashCanOutline}" />
+                </Button>
+              </Grid>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </StackPanel>
+    </Border>
+
+    <!-- New rule -->
+    <TextBlock Classes="groupname" Text="{l:T 'New rule'}" />
+    <Border Classes="group">
+      <StackPanel Spacing="8" Margin="0,8">
+        <TextBox Text="{Binding NewPhrase}" Watermark="{l:T 'Word or phrase'}" MaxLength="160" />
+        <WrapPanel Orientation="Horizontal">
+          <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,0,16,6">
+            <TextBlock Text="{l:T 'Look in'}" VerticalAlignment="Center" />
+            <ComboBox ItemsSource="{Binding LookInOptions}" SelectedItem="{Binding NewLookIn}" MinWidth="170" />
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,0,16,6">
+            <TextBlock Text="{l:T 'Match'}" VerticalAlignment="Center" />
+            <ComboBox ItemsSource="{Binding MatchOptions}" SelectedItem="{Binding NewMatch}" MinWidth="150" />
+          </StackPanel>
+          <Button Classes="accent" Content="{l:T 'Add rule'}" Command="{Binding AddRuleCommand}" Margin="0,0,0,6" />
+        </WrapPanel>
+        <TextBlock Classes="hint" Text="{Binding NewRuleHint}" TextWrapping="Wrap" />
+      </StackPanel>
+    </Border>
+
+    <!-- Where the rules apply -->
+    <TextBlock Classes="groupname" Text="{l:T 'Use rules for'}" />
+    <Border Classes="group">
+      <StackPanel>
+        <ItemsControl ItemsSource="{Binding Kinds}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:TextRuleKindRow">
+              <StackPanel>
+                <ctl:SettingRow Title="{Binding Title}" Hint="{Binding Summary}">
+                  <ToggleSwitch IsChecked="{Binding IsOn}" />
+                </ctl:SettingRow>
+                <StackPanel Margin="16,0,0,8" Spacing="2" IsVisible="{Binding IsOn}">
+                  <CheckBox Content="{l:T 'All chats, including chats you join later'}" IsChecked="{Binding IsAll}" />
+                  <ItemsControl ItemsSource="{Binding Chats}" IsVisible="{Binding ShowsChatList}" Margin="20,0,0,0">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="vm:TextRuleChatRow">
+                        <CheckBox Content="{Binding Name}" IsChecked="{Binding IsSelected}" />
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                  <TextBlock Classes="hint" Margin="20,2,0,0" Text="{l:T 'No chats of this kind on this radio yet.'}">
+                    <TextBlock.IsVisible>
+                      <MultiBinding Converter="{x:Static BoolConverters.And}">
+                        <Binding Path="ShowsChatList" />
+                        <Binding Path="!HasChats" />
+                      </MultiBinding>
+                    </TextBlock.IsVisible>
+                  </TextBlock>
+                </StackPanel>
+              </StackPanel>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </StackPanel>
+    </Border>
+    <TextBlock Classes="hint" Margin="4,6,0,0" TextWrapping="Wrap" Text="{l:T 'On includes every chat of that type, including chats you join later. Hidden messages aren\'t saved, notified or counted as unread.'}" />
+
+    <!-- Recently blocked -->
+    <DockPanel Margin="0,18,0,6">
+      <Button DockPanel.Dock="Right" Content="{l:T 'Clear'}" Command="{Binding ClearBlockedCommand}" IsVisible="{Binding HasBlocked}" />
+      <TextBlock Classes="groupname" Margin="0" VerticalAlignment="Center" Text="{Binding BlockedTitle}" />
+    </DockPanel>
+    <Border Classes="group">
+      <StackPanel>
+        <TextBlock Classes="hint" Margin="0,10" Text="{l:T 'No hidden messages'}" IsVisible="{Binding !HasBlocked}" />
+        <ItemsControl ItemsSource="{Binding Blocked}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:RecentlyBlockedRow">
+              <Grid ColumnDefinitions="*,Auto" Margin="0,6">
+                <StackPanel VerticalAlignment="Center">
+                  <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                  <TextBlock Text="{Binding Caption}" Classes="caption" TextWrapping="Wrap" />
+                </StackPanel>
+                <Button Grid.Column="1" Classes="icon" ToolTip.Tip="{l:T 'Remove'}" VerticalAlignment="Center"
+                        Command="{Binding $parent[ItemsControl].((vm:BlocksFiltersViewModel)DataContext).DeleteBlockedCommand}" CommandParameter="{Binding}">
+                  <PathIcon Classes="small" Data="{DynamicResource Icon.Close}" />
+                </Button>
+              </Grid>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </StackPanel>
+    </Border>
+    <TextBlock Classes="hint" Margin="4,6,0,0" TextWrapping="Wrap" Text="{Binding BlockedFooter}" />
+  </StackPanel>
+</UserControl>

@@ -14,6 +14,7 @@
   <ItemGroup>
     <Using Include="MC1.Core.Localization" />
     <EmbeddedResource Include="Localization\Strings\*.json" LogicalName="MC1.Core.Strings.%(Filename).json" />
+    <EmbeddedResource Include="Mecp\Languages\*.json" LogicalName="MC1.Core.Mecp.%(Filename).json" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="MC1.Core.Tests" />

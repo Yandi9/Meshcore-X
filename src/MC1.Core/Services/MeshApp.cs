@@ -59,6 +59,7 @@ public sealed partial class MeshApp : IAsyncDisposable
         NodeConfig = new NodeConfigService(this);
         Backup = new BackupService(this);
         PendingConfig = new PendingConfigService(this);
+        TextRules = new TextRulesService(this);
         DataChanged += RevokeRemoteCliWhenBlocked;
         Log.Info("App", $"MeshCore for Windows started. Data folder: {AppPaths.Root}");
     }
@@ -81,6 +82,8 @@ public sealed partial class MeshApp : IAsyncDisposable
     public BackupService Backup { get; }
     /// <summary>Radio settings/channels/contacts restored while disconnected, written when that radio connects.</summary>
     public PendingConfigService PendingConfig { get; }
+    /// <summary>Blocks &amp; filters: word or phrase rules that hide incoming messages.</summary>
+    public TextRulesService TextRules { get; }
 
     /// <summary>Factory for Bluetooth transports (provided by the Windows layer).</summary>
     public Func<ConnectionTarget, IMeshTransport>? BluetoothTransportFactory { get; set; }

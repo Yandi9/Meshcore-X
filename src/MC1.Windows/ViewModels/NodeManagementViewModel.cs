@@ -14,6 +14,17 @@ namespace MC1.Windows.ViewModels;
 public sealed record NeighbourRow(string Name, string KeyText, string HeardText, double Snr, string SnrText, string Color);
 public sealed record AclRow(string Name, string KeyText, string Permission);
 
+/// <summary>One of a sensor's settings, with the value being edited.</summary>
+public sealed partial class SensorSettingRow(SensorSetting setting) : ObservableObject
+{
+    public SensorSetting Setting { get; private set; } = setting;
+    public string Key => Setting.Key;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(IsChanged))] private string _value = setting.Value;
+    public bool IsChanged => Value != Setting.Value;
+
+    internal void Saved(SensorSetting s) { Setting = s; Value = s.Value; OnPropertyChanged(nameof(IsChanged)); }
+}
+
 /// <summary>
 /// The "Manage node" dialog for a repeater, room server or sensor. The dialog is only a window onto the node's
 /// <see cref="RemoteAdminWorkspace"/>: closing it doesn't stop a status, telemetry or neighbours request (or reading
@@ -77,6 +88,7 @@ public sealed partial class RemoteAdminWorkspace : ViewModelBase
         Title = contact.DisplayName;
         IsRoom = contact.ContactType == ContactType.Room;
         IsRepeater = contact.ContactType == ContactType.Repeater;
+        IsSensor = contact.ContactType == ContactType.Sensor;
         TypeText = Formatters.TypeName(contact.ContactType);
         IconKey = Formatters.ContactIcon(contact.ContactType);
         Emoji = Formatters.AvatarEmoji(contact.DisplayName);
@@ -110,7 +122,54 @@ public sealed partial class RemoteAdminWorkspace : ViewModelBase
     public string KeyText { get; }
     public bool IsRoom { get; }
     public bool IsRepeater { get; }
+    public bool IsSensor { get; }
     public Action? Close { get; set; }
+
+    // Sensor management (MeshCore One 1.7)
+    public ObservableCollection<SensorSettingRow> SensorSettings { get; } = new();
+    [ObservableProperty] private bool _sensorSettingsLoaded;
+    [ObservableProperty] private string? _sensorNote;
+
+    [RelayCommand]
+    private async Task LoadSensorSettings()
+    {
+        if (!IsAdmin) { Message = L.T("Sensor management requires administrator access."); return; }
+        await Run(async () =>
+        {
+            var list = await Core.Remote.SensorSettingsAsync(_contact);
+            SensorSettings.Clear();
+            foreach (var setting in list) SensorSettings.Add(new SensorSettingRow(setting));
+            SensorSettingsLoaded = true;
+            SensorNote = list.Count == 0 ? L.T("This sensor exposes no settings.") : null;
+        }, L.T("Loading the sensor's settings…"), e => L.F("Couldn't load the sensor's settings: {0}", e));
+    }
+
+    [RelayCommand]
+    private async Task SaveSensorSetting(SensorSettingRow row)
+    {
+        if (!IsAdmin) { Message = L.T("Sensor management requires administrator access."); return; }
+        var value = row.Value;
+        await Run(async () =>
+        {
+            var saved = await Core.Remote.SetSensorSettingAsync(_contact, row.Setting, value);
+            row.Saved(saved);
+            Message = L.T("Setting verified.");
+        }, L.F("Saving {0}…", row.Key), e => e);
+    }
+
+    [RelayCommand]
+    private async Task RebootSensor()
+    {
+        if (!IsAdmin) { Message = L.T("Sensor management requires administrator access."); return; }
+        if (!await AppHost.Dialogs.Confirm(L.T("Reboot sensor?"), L.T("Send a reboot request to this sensor?"), L.T("Reboot"), destructive: true)) return;
+        await Run(async () =>
+        {
+            await Core.Remote.RebootSensorAsync(_contact);
+            SensorSettingsLoaded = false;
+            SensorSettings.Clear();
+            Message = L.T("Reboot request sent. The sensor has not confirmed a restart. Authenticate again before sending more commands.");
+        }, L.T("Sending reboot request…"), e => L.F("Reboot failed: {0}", e));
+    }
 
     public ObservableCollection<DetailRow> StatusRows { get; } = new();
     public ObservableCollection<DetailRow> TelemetryRows { get; } = new();
@@ -260,7 +319,7 @@ public sealed partial class RemoteAdminWorkspace : ViewModelBase
     {
         var t = await Core.Remote.RequestTelemetryAsync(_contact);
         TelemetryRows.Clear();
-        foreach (var p in t.DataPoints) TelemetryRows.Add(new DetailRow(L.F("{0} · ch {1}", p.Type.DisplayName(), p.Channel), p.FormattedValue));
+        foreach (var p in t.DataPoints) TelemetryRows.Add(new DetailRow(L.F("{0} · ch {1}", TelemetryFormat.Label(p), p.Channel), TelemetryFormat.Value(p, Core.Settings.Current.UseMetricUnits)));
         if (TelemetryRows.Count == 0) Message = L.T("The node returned no telemetry (it may only share telemetry with admins or favourites).");
         LoadHistory();
     }, L.T("Requesting telemetry…"), e => L.F("Requesting telemetry failed: {0}", e));
